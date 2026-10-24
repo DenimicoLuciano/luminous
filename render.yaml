@@ -1,4 +1,7 @@
-# Render blueprint: one Docker web service + persistent disk for SQLite + uploads.
+# Render blueprint: one Docker web service on the free plan.
+# Free services cannot attach persistent disks, so app data is ephemeral
+# and resets on redeploy or restart. Move the plan to starter and re-add
+# a disk block (mountPath /app/data) to make data permanent.
 services:
   - type: web
     name: luminous
@@ -6,10 +9,6 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/config
-    disk:
-      name: luminous-data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
