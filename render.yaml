@@ -1,0 +1,21 @@
+# Render blueprint: one Docker web service + persistent disk for SQLite + uploads.
+services:
+  - type: web
+    name: luminous
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/config
+    disk:
+      name: luminous-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /app/data
+      - key: OPENAI_API_KEY
+        sync: false # set in the Render dashboard — AI mentors/companions need this
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
