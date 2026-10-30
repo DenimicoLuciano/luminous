@@ -25,3 +25,9 @@ services:
         value: gpt-4o-mini
       - key: AI_BASE_URL
         sync: false # optional: point at another OpenAI-compatible endpoint (e.g. Gemini free tier)
+      - key: TURN_URL
+        sync: false # optional: WebRTC TURN relay (fixes live video on strict networks)
+      - key: TURN_USERNAME
+        sync: false # set together with TURN_URL and TURN_PASSWORD in the Render dashboard
+      - key: TURN_PASSWORD
+        sync: false
