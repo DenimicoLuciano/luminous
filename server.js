@@ -306,8 +306,9 @@ app.get('/api/posts/scheduled', authRequired, (req, res) => {
 });
 
 app.delete('/api/posts/scheduled/:id', authRequired, (req, res) => {
-  const r = db.prepare('DELETE FROM scheduled_posts WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
-  if (!r.changes) return res.status(404).json({ error: 'Planned post not found' });
+  const own = db.prepare('SELECT id FROM scheduled_posts WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!own) return res.status(404).json({ error: 'Planned post not found' });
+  db.prepare('DELETE FROM scheduled_posts WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
