@@ -559,6 +559,7 @@ app.get('/api/live', (req, res) => {
     SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.role
     FROM live_streams l JOIN users u ON u.id = l.user_id
     WHERE l.status = 'live' ORDER BY l.started_at DESC`).all();
+  rows.forEach(s => { const c = liveCounts(s.id); s.viewers_now = c.viewers; s.on_stage = c.stage; });
   res.json({ streams: rows });
 });
 
@@ -567,19 +568,26 @@ app.post('/api/live/start', authRequired, (req, res) => {
   if (existing) return res.status(400).json({ error: 'You already have a live stream' });
   const title = (req.body.title || 'Live now ✨').slice(0, 120);
   const r = db.prepare('INSERT INTO live_streams (user_id, title) VALUES (?,?)').run(req.user.id, title);
+  db.prepare(`INSERT OR REPLACE INTO live_participants (stream_id, user_id, role, status, joined_at, last_seen)
+    VALUES (?, ?, 'host', 'joined', datetime('now'), datetime('now'))`).run(r.lastInsertRowid, req.user.id);
   addXp(req.user.id, 15);
   unlockMilestone(req.user.id, 'going-live');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
-app.get('/api/live/:id', (req, res) => {
+app.get('/api/live/:id', optionalAuth, (req, res) => {
   const s = db.prepare(`SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.role
     FROM live_streams l JOIN users u ON u.id = l.user_id WHERE l.id = ?`).get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Stream not found' });
   const events = db.prepare(`SELECT e.*, u.display_name FROM live_events e
     LEFT JOIN users u ON u.id = e.user_id
-    WHERE e.stream_id = ? ORDER BY e.id DESC LIMIT 30`).all(s.id);
-  res.json({ stream: s, events: events.reverse() });
+    WHERE e.stream_id = ? ORDER BY e.id DESC LIMIT 40`).all(s.id);
+  const counts = liveCounts(s.id);
+  if (s.status === 'live' && counts.viewers > (s.viewers || 0))
+    db.prepare('UPDATE live_streams SET viewers = ? WHERE id = ?').run(counts.viewers, s.id);
+  const participants = liveParticipants(s.id);
+  const me = req.user ? participants.find(p => p.user_id === req.user.id) || null : null;
+  res.json({ stream: { ...s, viewers_now: counts.viewers, on_stage: counts.stage }, events: events.reverse(), participants, me });
 });
 
 function liveActive(id) {
@@ -587,6 +595,38 @@ function liveActive(id) {
 }
 function addStreamCoins(streamId, coins) {
   db.prepare('UPDATE live_streams SET coins_earned = coins_earned + ? WHERE id = ?').run(coins, streamId);
+}
+
+// ---------- live rooms: participants, stage, signaling ----------
+const MAX_STAGE = 6; // host + cohost + guests, TikTok-style boxes
+function liveCounts(streamId) {
+  const stage = db.prepare(`SELECT COUNT(*) c FROM live_participants
+    WHERE stream_id = ? AND status = 'joined' AND role IN ('host','cohost','guest')`).get(streamId).c;
+  const viewers = db.prepare(`SELECT COUNT(*) c FROM live_participants
+    WHERE stream_id = ? AND status = 'joined' AND last_seen > datetime('now','-120 seconds')`).get(streamId).c;
+  return { stage, viewers };
+}
+function liveParticipants(streamId) {
+  return db.prepare(`SELECT p.id, p.stream_id, p.user_id, p.role, p.status, p.joined_at,
+      u.username, u.display_name, u.avatar_emoji, u.account_type, u.verified, u.role AS user_role
+    FROM live_participants p JOIN users u ON u.id = p.user_id
+    WHERE p.stream_id = ? AND p.status IN ('joined','requested','invited')
+    ORDER BY CASE p.role WHEN 'host' THEN 0 WHEN 'cohost' THEN 1 WHEN 'guest' THEN 2 ELSE 3 END, p.id`).all(streamId);
+}
+function myParticipant(streamId, userId) {
+  return db.prepare('SELECT * FROM live_participants WHERE stream_id = ? AND user_id = ?').get(streamId, userId);
+}
+function stageEvent(streamId, userId, note) {
+  db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,0,?)')
+    .run(streamId, userId, 'stage', note);
+}
+function upsertParticipant(streamId, userId, role, status) {
+  db.prepare(`INSERT INTO live_participants (stream_id, user_id, role, status, joined_at, last_seen)
+    VALUES (?, ?, ?, ?, CASE WHEN ? = 'joined' THEN datetime('now') END, datetime('now'))
+    ON CONFLICT(stream_id, user_id) DO UPDATE SET role = excluded.role, status = excluded.status,
+      joined_at = CASE WHEN excluded.status = 'joined' THEN datetime('now') ELSE live_participants.joined_at END,
+      last_seen = datetime('now')`).run(streamId, userId, role, status, status);
+  return myParticipant(streamId, userId);
 }
 
 // 10 taps = 5 coins
@@ -682,8 +722,165 @@ app.post('/api/live/:id/end', authRequired, (req, res) => {
   db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(s.coins_earned, req.user.id);
   db.prepare('UPDATE live_streams SET status = \'ended\', ended_at = datetime(\'now\') WHERE id = ?').run(s.id);
   const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
+  db.prepare("UPDATE live_participants SET status = 'left' WHERE stream_id = ?").run(s.id);
   if (w.coins >= 100) unlockMilestone(req.user.id, 'coin-earner');
   res.json({ ok: true, earned: s.coins_earned });
+});
+
+// ---------- live room: join, stage, comments, signaling ----------
+// Join the room (or refresh your seat). Host re-seats as host; everyone else as viewer.
+app.post('/api/live/:id/join', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  let p = myParticipant(s.id, req.user.id);
+  if (s.user_id === req.user.id) {
+    p = upsertParticipant(s.id, req.user.id, 'host', 'joined');
+  } else if (p && ['host', 'cohost', 'guest'].includes(p.role) && ['joined', 'requested', 'invited'].includes(p.status)) {
+    db.prepare("UPDATE live_participants SET last_seen = datetime('now') WHERE id = ?").run(p.id);
+    p = myParticipant(s.id, req.user.id);
+  } else {
+    p = upsertParticipant(s.id, req.user.id, 'viewer', 'joined');
+  }
+  res.json({ ok: true, participant: { user_id: p.user_id, role: p.role, status: p.status } });
+});
+
+// Presence heartbeat (keeps the viewer count honest)
+app.post('/api/live/:id/heartbeat', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const p = myParticipant(s.id, req.user.id);
+  if (!p) upsertParticipant(s.id, req.user.id, s.user_id === req.user.id ? 'host' : 'viewer', 'joined');
+  else db.prepare("UPDATE live_participants SET last_seen = datetime('now') WHERE id = ?").run(p.id);
+  res.json({ ok: true });
+});
+
+// Live comment (shows in the room chat + activity feed)
+app.post('/api/live/:id/comment', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const text = String((req.body || {}).text || '').trim().slice(0, 300);
+  if (!text) return res.status(400).json({ error: 'Empty comment' });
+  const r = db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,0,?)')
+    .run(s.id, req.user.id, 'comment', text);
+  res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+// Ask to come on stage as a guest (host approves)
+app.post('/api/live/:id/request-guest', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  if (s.user_id === req.user.id) return res.status(400).json({ error: 'You are the host' });
+  const p = myParticipant(s.id, req.user.id);
+  if (p && p.status === 'joined' && ['cohost', 'guest'].includes(p.role))
+    return res.json({ ok: true, already: true });
+  if (liveCounts(s.id).stage >= MAX_STAGE) return res.status(400).json({ error: 'Stage is full' });
+  upsertParticipant(s.id, req.user.id, 'guest', 'requested');
+  stageEvent(s.id, req.user.id, 'asked to join the stage 🎤');
+  res.json({ ok: true });
+});
+
+// Host approves / denies a guest request
+app.post('/api/live/:id/decide-guest', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s || s.user_id !== req.user.id) return res.status(403).json({ error: 'Only the host can decide' });
+  const target = myParticipant(s.id, parseInt(req.body.user_id));
+  if (!target || target.status !== 'requested') return res.status(404).json({ error: 'No pending request' });
+  if (req.body.approve) {
+    if (liveCounts(s.id).stage >= MAX_STAGE) return res.status(400).json({ error: 'Stage is full' });
+    upsertParticipant(s.id, target.user_id, 'guest', 'joined');
+    stageEvent(s.id, target.user_id, 'joined the stage 🎤');
+  } else {
+    db.prepare("UPDATE live_participants SET status = 'denied' WHERE id = ?").run(target.id);
+  }
+  res.json({ ok: true });
+});
+
+// Host invites a co-host by username
+app.post('/api/live/:id/invite-cohost', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s || s.user_id !== req.user.id) return res.status(403).json({ error: 'Only the host can invite a co-host' });
+  const username = String((req.body || {}).username || '').trim().replace(/^@/, '');
+  const target = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.id === req.user.id) return res.status(400).json({ error: 'You are the host' });
+  const existing = myParticipant(s.id, target.id);
+  if (existing && existing.status === 'joined' && existing.role === 'cohost')
+    return res.json({ ok: true, already: true });
+  upsertParticipant(s.id, target.id, 'cohost', 'invited');
+  stageEvent(s.id, target.id, 'was invited to co-host ⭐');
+  res.json({ ok: true });
+});
+
+// Invitees answer a co-host invite
+app.post('/api/live/:id/respond-invite', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const p = myParticipant(s.id, req.user.id);
+  if (!p || p.role !== 'cohost' || p.status !== 'invited')
+    return res.status(404).json({ error: 'No pending invite' });
+  if (req.body.accept) {
+    if (liveCounts(s.id).stage >= MAX_STAGE) return res.status(400).json({ error: 'Stage is full' });
+    upsertParticipant(s.id, req.user.id, 'cohost', 'joined');
+    stageEvent(s.id, req.user.id, 'joined as co-host ⭐');
+  } else {
+    db.prepare("UPDATE live_participants SET status = 'denied' WHERE id = ?").run(p.id);
+  }
+  res.json({ ok: true });
+});
+
+// Step down from the stage (host must end the stream instead)
+app.post('/api/live/:id/leave-stage', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  if (s.user_id === req.user.id) return res.status(400).json({ error: 'Host must end the stream' });
+  const p = myParticipant(s.id, req.user.id);
+  if (p && p.status === 'joined' && ['cohost', 'guest'].includes(p.role)) {
+    db.prepare("UPDATE live_participants SET status = 'left' WHERE id = ?").run(p.id);
+    stageEvent(s.id, req.user.id, 'left the stage');
+  }
+  res.json({ ok: true });
+});
+
+// Host removes someone from the stage
+app.post('/api/live/:id/remove', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s || s.user_id !== req.user.id) return res.status(403).json({ error: 'Only the host can remove' });
+  const target = myParticipant(s.id, parseInt(req.body.user_id));
+  if (!target || target.user_id === s.user_id) return res.status(404).json({ error: 'Not on stage' });
+  db.prepare("UPDATE live_participants SET status = 'kicked' WHERE id = ?").run(target.id);
+  stageEvent(s.id, target.user_id, 'was removed from the stage');
+  res.json({ ok: true });
+});
+
+// WebRTC signaling relay for the room (REST polling, same pattern as 1:1 calls)
+app.post('/api/live/:id/signal', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const { to_id, kind } = req.body || {};
+  const KINDS = ['offer', 'answer', 'candidate', 'track-map', 'bye'];
+  if (!KINDS.includes(kind)) return res.status(400).json({ error: 'Bad signal kind' });
+  const me = myParticipant(s.id, req.user.id);
+  if (!me || me.status !== 'joined') return res.status(403).json({ error: 'Join the room first' });
+  const toId = parseInt(to_id) || 0;
+  if (toId !== 0) {
+    const target = myParticipant(s.id, toId);
+    if (!target || target.status !== 'joined') return res.status(404).json({ error: 'Recipient not in room' });
+  }
+  const payload = String((req.body || {}).payload || '').slice(0, 100000);
+  const r = db.prepare('INSERT INTO live_signals (stream_id, from_id, to_id, kind, payload) VALUES (?,?,?,?,?)')
+    .run(s.id, req.user.id, toId, kind, payload);
+  res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+app.get('/api/live/:id/signals', authRequired, (req, res) => {
+  const s = liveActive(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const since = parseInt(req.query.since) || 0;
+  if (since === 0) db.prepare("DELETE FROM live_signals WHERE stream_id = ? AND created_at < datetime('now','-10 minutes')").run(s.id);
+  const rows = db.prepare(`SELECT * FROM live_signals
+    WHERE stream_id = ? AND id > ? AND from_id != ? AND (to_id = ? OR to_id = 0)
+    ORDER BY id ASC LIMIT 200`).all(s.id, since, req.user.id, req.user.id);
+  res.json({ signals: rows });
 });
 
 // ---------- wallet & payouts ----------
