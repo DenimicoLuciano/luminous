@@ -30,6 +30,9 @@ function badgesHtml(u) {
   if (u.account_type && u.account_type !== 'personal') h += `<span class="badge">${esc(u.account_type)}</span>`;
   return h;
 }
+const linkify = (s) => s.replace(/(https?:\/\/[^\s<]+)/g, (u) => '<a href="' + u + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline">' + u + '</a>');
+let ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+fetch('/api/config').then(r => r.json()).then(c => { if (c && Array.isArray(c.iceServers) && c.iceServers.length) ICE_SERVERS = c.iceServers; }).catch(() => {});
 function postCard(p) {
   const ad = p.is_ad || p._adSlot;
   return `<div class="card${ad ? ' ad-card' : ''}">
@@ -40,7 +43,7 @@ function postCard(p) {
         <div class="post-time">@${esc(p.username)} · ${timeAgo(p.created_at)} · 👁 ${p.views || 0}</div>
       </div>
     </div>
-    ${p.content ? `<div class="post-content">${esc(p.content)}</div>` : ''}
+    ${p.content ? `<div class="post-content">${linkify(esc(p.content))}</div>` : ''}
     ${p.image_url ? `<img class="post-img" src="${esc(p.image_url)}" loading="lazy" alt="post image">` : ''}
   </div>`;
 }
@@ -120,7 +123,7 @@ const CallUI = {
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
     const local = document.getElementById('callLocal');
     if (local) local.srcObject = this.stream;
-    this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     this.stream.getTracks().forEach(t => this.pc.addTrack(t, this.stream));
     this.pc.ontrack = (e) => {
       const remote = document.getElementById('callRemote');
@@ -387,7 +390,7 @@ const Views = {
     const stream = data.stream;
     const isHost = !!(App.user && App.user.id === stream.user_id);
     const RTC_OK = typeof RTCPeerConnection !== 'undefined';
-    const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const ICE = { iceServers: ICE_SERVERS };
 
     el.innerHTML = `
     <div class="live-room" id="lvRoom">
