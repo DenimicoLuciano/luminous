@@ -189,6 +189,14 @@ CREATE TABLE IF NOT EXISTS payouts (
   status TEXT NOT NULL DEFAULT 'pending',       -- pending | paid | rejected
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS payout_methods (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  method TEXT NOT NULL,                          -- paypal | visa_debit
+  paypal_email TEXT,
+  card_last4 TEXT,
+  card_name TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS password_resets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -252,6 +260,9 @@ db.exec(SCHEMA);
 
 // ---- Migrations for existing databases ----
 // role column (added with the Developer account system)
+const payoutCols = db.prepare('PRAGMA table_info(payouts)').all().map(c => c.name);
+if (!payoutCols.includes('method')) db.exec("ALTER TABLE payouts ADD COLUMN method TEXT");
+if (!payoutCols.includes('destination')) db.exec("ALTER TABLE payouts ADD COLUMN destination TEXT");
 const userCols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userCols.includes('role')) {
   db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
