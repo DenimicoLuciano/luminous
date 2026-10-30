@@ -47,6 +47,175 @@ function postCard(p) {
 const aiNotice = () => `<div class="notice">🤖 <b>AI is not configured on this server yet.</b><br>
   <span class="muted">The server owner needs to set an <code>OPENAI_API_KEY</code> environment variable and redeploy. Everything else in Luminous works without it.</span></div>`;
 
+/* ---------------- friends helpers ---------------- */
+function tierChip(t) {
+  if (!t) return '';
+  return `<span class="tier-chip tier-${t.key}">${t.emoji} ${t.label}</span>`;
+}
+function friendRow(f) {
+  const u = f.user, t = f.tier;
+  const sub = t.next
+    ? `Friends for ${t.days} day${t.days === 1 ? '' : 's'} · ${t.next.inDays} day${t.next.inDays === 1 ? '' : 's'} to ${t.next.label}`
+    : `Friends for ${t.days} days · top level!`;
+  return `<div class="card friend-card">
+    <div class="friend-row">${avatarHtml(u, 48)}
+      <div class="grow">
+        <div class="name"><a href="#/profile/${esc(u.username)}" style="color:inherit">${esc(u.display_name)}</a> ${badgesHtml(u)}${f.unread ? ` <span class="badge unread">${f.unread} new</span>` : ''}</div>
+        <div class="muted">@${esc(u.username)}${f.last_message ? ' · ' + esc(f.last_message.content.slice(0, 42)) : ''}</div>
+        <div class="tier-line">${tierChip(t)} <span class="muted">${sub}</span></div>
+      </div>
+    </div>
+    <div class="friend-actions">
+      <a class="btn small" href="#/chat/${u.id}">💬 Message</a>
+      <button class="btn small" data-call-kind="audio" data-call-user="${u.id}" data-call-name="${esc(u.display_name)}">📞 Call</button>
+      <button class="btn small" data-call-kind="video" data-call-user="${u.id}" data-call-name="${esc(u.display_name)}">🎥 Video</button>
+      <button class="btn small ghost" data-remove="${f.friendship_id}">Remove</button>
+    </div>
+  </div>`;
+}
+function personRow(r) {
+  const u = r.user;
+  let action = '';
+  if (r.rel === 'none') action = `<button class="btn small" data-add="${u.id}">➕ Add friend</button>`;
+  else if (r.rel === 'pending_out') action = `<span class="muted">Request sent</span>`;
+  else if (r.rel === 'pending_in') action = `<button class="btn small" data-accept="${r.friendship_id}">Accept</button>`;
+  else action = `<a class="btn small" href="#/chat/${u.id}">💬 Message</a>`;
+  return `<div class="friend-row">${avatarHtml(u, 44)}
+    <div class="grow"><div class="name">${esc(u.display_name)} ${badgesHtml(u)}</div><div class="muted">@${esc(u.username)}</div></div>${action}</div>`;
+}
+function msgHtml(m) {
+  const mine = App.user && m.sender_id === App.user.id;
+  return `<div class="msg ${mine ? 'me' : 'them'}"><div class="bubble">${esc(m.content)}</div><div class="msg-time">${timeAgo(m.created_at)}</div></div>`;
+}
+
+/* ---------------- calls (WebRTC over REST signaling) ---------------- */
+const CallUI = {
+  pc: null, stream: null, callId: null, poll: null, seenCandidates: 0, remoteSet: false,
+
+  _overlay(html) {
+    let ov = document.getElementById('callOverlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'callOverlay'; document.body.appendChild(ov); }
+    ov.innerHTML = `<div class="call-box">${html}</div>`;
+    return ov;
+  },
+  _close() {
+    if (this.poll) { clearInterval(this.poll); this.poll = null; }
+    if (this.pc) { try { this.pc.close(); } catch (e) {} this.pc = null; }
+    if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
+    window._activeCall = false; this.callId = null; this.seenCandidates = 0; this.remoteSet = false;
+    const ov = document.getElementById('callOverlay');
+    if (ov) ov.remove();
+  },
+  _callScreen(kind, name, status) {
+    this._overlay(`
+      ${kind === 'video'
+        ? `<video id="callRemote" autoplay playsinline></video><video id="callLocal" autoplay muted playsinline></video>`
+        : `<div class="call-avatar">📞</div>`}
+      <div class="call-name">${esc(name)}</div>
+      <div class="call-status" id="callStatus">${esc(status)}</div>
+      <button class="btn hangup" id="callEnd">📵 End call</button>`);
+    document.getElementById('callEnd').onclick = () => this.hangup(true);
+  },
+  async _setup(kind) {
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
+    const local = document.getElementById('callLocal');
+    if (local) local.srcObject = this.stream;
+    this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    this.stream.getTracks().forEach(t => this.pc.addTrack(t, this.stream));
+    this.pc.ontrack = (e) => {
+      const remote = document.getElementById('callRemote');
+      if (remote && e.streams[0]) remote.srcObject = e.streams[0];
+    };
+    this.pc.onicecandidate = (e) => {
+      if (e.candidate && this.callId) API.post(`/calls/${this.callId}/candidates`, { candidate: e.candidate.toJSON() }).catch(() => {});
+    };
+  },
+  _setStatus(s) { const el = document.getElementById('callStatus'); if (el) el.textContent = s; },
+  _pollLoop(isCaller) {
+    this.poll = setInterval(async () => {
+      if (!this.callId || !this.pc) return;
+      try {
+        const { call, candidates } = await API.get(`/calls/${this.callId}`);
+        if (['ended', 'declined', 'missed'].includes(call.status)) { toast('Call ended'); this._close(); return; }
+        if (isCaller && call.answer && !this.remoteSet) {
+          await this.pc.setRemoteDescription({ type: 'answer', sdp: call.answer });
+          this.remoteSet = true;
+        }
+        for (; this.seenCandidates < candidates.length; this.seenCandidates++) {
+          try { await this.pc.addIceCandidate(JSON.parse(candidates[this.seenCandidates])); } catch (e) {}
+        }
+        if (call.status === 'ongoing') this._setStatus('Connected ✅');
+      } catch (e) { /* ignore */ }
+    }, 1500);
+  },
+  async start(userId, kind, name) {
+    if (window._activeCall) return;
+    try {
+      const { call } = await API.post('/calls', { user_id: userId, kind });
+      this.callId = call.id;
+      window._activeCall = true;
+      this._callScreen(kind, name, 'Calling…');
+      await this._setup(kind);
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      await API.post(`/calls/${this.callId}/offer`, { sdp: offer.sdp });
+      this._setStatus('Ringing…');
+      this._pollLoop(true);
+    } catch (e) {
+      toast(e.data?.error || 'Could not start the call — check camera/mic permission');
+      this._close();
+    }
+  },
+  incoming(call) {
+    if (window._activeCall || document.getElementById('callOverlay')) return;
+    this.callId = call.id;
+    const name = call.other ? call.other.display_name : 'A friend';
+    this._overlay(`
+      <div class="call-avatar">${call.kind === 'video' ? '🎥' : '📞'}</div>
+      <div class="call-name">${esc(name)}</div>
+      <div class="call-status">Incoming ${call.kind} call…</div>
+      <div class="row" style="justify-content:center;gap:10px">
+        <button class="btn" id="callAccept">✅ Answer</button>
+        <button class="btn hangup" id="callDecline">Decline</button>
+      </div>`);
+    document.getElementById('callDecline').onclick = async () => {
+      try { await API.post(`/calls/${call.id}/decline`, {}); } catch (e) {}
+      this._close();
+    };
+    document.getElementById('callAccept').onclick = () => this._accept(call, name);
+  },
+  async _accept(call, name) {
+    try {
+      window._activeCall = true;
+      this._callScreen(call.kind, name, 'Connecting…');
+      await this._setup(call.kind);
+      let offerSdp = call.offer;
+      for (let i = 0; !offerSdp && i < 20; i++) {
+        await new Promise(r => setTimeout(r, 800));
+        const d = await API.get(`/calls/${call.id}`);
+        offerSdp = d.call.offer;
+        if (['ended', 'declined', 'missed'].includes(d.call.status)) { this._close(); return; }
+      }
+      if (!offerSdp) { toast('Call could not connect'); this._close(); return; }
+      await this.pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+      this.remoteSet = true;
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+      await API.post(`/calls/${call.id}/answer`, { sdp: answer.sdp });
+      this._setStatus('Connected ✅');
+      this._pollLoop(false);
+    } catch (e) {
+      toast('Could not answer — check camera/mic permission');
+      this._close();
+    }
+  },
+  async hangup(notify) {
+    const id = this.callId;
+    this._close();
+    if (notify && id) { try { await API.post(`/calls/${id}/end`, {}); } catch (e) {} }
+  },
+};
+
 const Views = {
 
   /* ---------------- FEED ---------------- */
@@ -678,6 +847,9 @@ const Views = {
             : ''}
         </div>`).join('')}
       </div>
+      <div class="card"><h4 style="margin:0 0 8px">🔑 Password reset requests</h4>
+        <div id="resetList"><div class="muted">Loading…</div></div>
+      </div>
       <div class="card"><h4 style="margin:0 0 8px">🛡 Moderation — recent posts</h4>
         ${content.posts.length ? content.posts.map(p => modRow('posts', p.id, (p.content || '').slice(0, 90), '@' + p.username)).join('') : '<div class="muted">No posts.</div>'}
         <h4 style="margin:14px 0 8px">Recent stories</h4>
@@ -699,6 +871,197 @@ const Views = {
       try { await API.del(`/admin/${kind}/${id}`); toast('Deleted 🗑'); Views.admin(el); }
       catch (e) { toast(e.data?.error || 'Could not delete'); }
     });
+    // password reset requests — the developer hands the code to the user
+    try {
+      const { resets } = await API.get('/admin/password-resets');
+      const box = document.getElementById('resetList');
+      if (box) {
+        box.innerHTML = resets.length ? resets.map(r => `
+          <div class="row" style="padding:6px 0;border-bottom:1px solid var(--line, #333)">
+            <div class="grow"><div class="name"><b>${esc(r.display_name)}</b></div>
+            <div class="post-time">@${esc(r.username)} · ${esc(r.email || '')} · asked ${timeAgo(r.created_at)} ago · expires ${esc(r.expires_at)} UTC</div></div>
+            <span class="badge" data-code-slot="${r.id}" style="display:none"></span>
+            <button class="btn small" data-show-code="${r.id}">Show code</button>
+            <button class="btn small ghost" data-dismiss-reset="${r.id}">Dismiss</button>
+          </div>`).join('') : '<div class="muted">No pending requests.</div>';
+        box.querySelectorAll('[data-show-code]').forEach(b => b.onclick = async () => {
+          try {
+            const { code } = await API.post(`/admin/password-resets/${b.dataset.showCode}/code`, {});
+            const slot = box.querySelector(`[data-code-slot="${b.dataset.showCode}"]`);
+            if (slot) { slot.textContent = 'Code: ' + code; slot.style.display = ''; }
+            b.style.display = 'none';
+          } catch (e) { toast('Could not load the code'); }
+        });
+        box.querySelectorAll('[data-dismiss-reset]').forEach(b => b.onclick = async () => {
+          try { await API.post(`/admin/password-resets/${b.dataset.dismissReset}/dismiss`, {}); Views.admin(el); }
+          catch (e) { toast('Could not dismiss'); }
+        });
+      }
+    } catch (e) { /* reset list is optional in the panel */ }
+  },
+
+  /* ---------------- DISCOVER ---------------- */
+  async discover(el) {
+    el.innerHTML = `
+      <div class="card"><h3 style="margin-top:0">🔍 Discover</h3>
+        <div class="search-row"><input id="discQ" placeholder="Search people and videos…"><button class="btn small" id="discBtn">Search</button></div>
+        <div id="discPeople" class="mt"></div>
+      </div>
+      <h3 class="section-title">🎬 Videos for you</h3>
+      <div id="discVids"><div class="card center"><div class="muted">Loading videos…</div></div></div>`;
+    const loadVids = async (q) => {
+      try {
+        const { lums } = await API.get('/lums' + (q ? '?q=' + encodeURIComponent(q) : ''));
+        const vids = document.getElementById('discVids');
+        if (!vids) return;
+        vids.innerHTML = lums.length ? `<div class="lum-grid">` + lums.map(l => `
+          <a class="lum-mini" href="#/lums">
+            ${l.video_url ? `<video src="${esc(l.video_url)}" muted playsinline preload="metadata"></video>` : `<div class="lum-mini-fallback">🎬</div>`}
+            <div class="lum-mini-cap"><b>${esc(l.display_name)}</b> · 👁 ${l.views || 0}<br>${esc((l.caption || '').slice(0, 60))}</div>
+          </a>`).join('') + `</div>`
+          : `<div class="card center"><div class="muted">No videos matched.</div></div>`;
+      } catch (e) { /* ignore */ }
+    };
+    await loadVids('');
+    const run = async () => {
+      const q = document.getElementById('discQ').value.trim();
+      loadVids(q);
+      const ppl = document.getElementById('discPeople');
+      if (!ppl) return;
+      if (q.length < 2) { ppl.innerHTML = ''; return; }
+      if (!App.user) { ppl.innerHTML = `<div class="muted">Log in to search people and add friends.</div>`; return; }
+      try {
+        const { results } = await API.get('/friends/search?q=' + encodeURIComponent(q));
+        ppl.innerHTML = results.length ? `<h4 style="margin:6px 0">People</h4>` + results.map(personRow).join('') : `<div class="muted">No people matched “${esc(q)}”.</div>`;
+        ppl.querySelectorAll('[data-add]').forEach(b => b.onclick = async () => {
+          try { const r = await API.post('/friends/request', { user_id: parseInt(b.dataset.add) }); toast(r.accepted ? 'You are now friends! 🎉' : 'Friend request sent 👋'); run(); }
+          catch (e) { toast(e.data?.error || 'Could not add'); }
+        });
+        ppl.querySelectorAll('[data-accept]').forEach(b => b.onclick = async () => {
+          try { await API.post(`/friends/${b.dataset.accept}/accept`, {}); toast('You are now friends! 🎉'); run(); }
+          catch (e) { toast(e.data?.error || 'Could not accept'); }
+        });
+      } catch (e) { /* ignore */ }
+    };
+    document.getElementById('discBtn').onclick = run;
+    let deb = null;
+    document.getElementById('discQ').addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(run, 450); });
+    document.getElementById('discQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+  },
+
+  /* ---------------- FRIENDS ---------------- */
+  async friends(el) {
+    el.innerHTML = `<div class="card center"><div class="muted">Loading friends…</div></div>`;
+    try {
+      const data = await API.get('/friends');
+      const reqHtml = data.incoming.length ? `<div class="card"><h3 style="margin-top:0">👋 Friend requests</h3>${data.incoming.map(f => `
+        <div class="friend-row">${avatarHtml(f.user, 44)}
+          <div class="grow"><div class="name">${esc(f.user.display_name)} ${badgesHtml(f.user)}</div><div class="muted">@${esc(f.user.username)} wants to be friends</div></div>
+          <button class="btn small" data-accept="${f.friendship_id}">Accept</button>
+          <button class="btn small ghost" data-decline="${f.friendship_id}">Decline</button>
+        </div>`).join('')}</div>` : '';
+      const outHtml = data.outgoing.length ? `<div class="card"><h3 style="margin-top:0">⏳ Sent requests</h3>${data.outgoing.map(f => `
+        <div class="friend-row">${avatarHtml(f.user, 44)}
+          <div class="grow"><div class="name">${esc(f.user.display_name)}</div><div class="muted">@${esc(f.user.username)} · waiting…</div></div>
+          <button class="btn small ghost" data-remove="${f.friendship_id}">Cancel</button>
+        </div>`).join('')}</div>` : '';
+      const listHtml = data.friends.length ? data.friends.map(friendRow).join('')
+        : `<div class="card center"><div class="muted">No friends yet — search above and add someone! The AI crew accepts instantly. 🤖</div></div>`;
+      el.innerHTML = `
+        <div class="card"><h3 style="margin-top:0">👥 Add friends</h3>
+          <div class="search-row"><input id="friendSearch" placeholder="Search by name or @username…"><button class="btn small" id="friendSearchBtn">Search</button></div>
+          <div id="friendResults" class="mt"></div>
+          <div class="muted mt">Every friendship starts as 🤝 <b>Acquaintances</b> and grows the longer you stay friends: 🙂 <b>Friends</b> at 7 days · 💛 <b>Close Friends</b> at 30 days · ⭐ <b>Best Friends</b> at 90 days</div>
+        </div>
+        ${reqHtml}${outHtml}
+        <h3 class="section-title">Your friends (${data.friends.length})</h3>
+        ${listHtml}`;
+      const rerun = () => Views.friends(el);
+      el.querySelectorAll('[data-accept]').forEach(b => b.onclick = async () => {
+        try { await API.post(`/friends/${b.dataset.accept}/accept`, {}); toast('You are now friends! 🎉'); rerun(); }
+        catch (e) { toast(e.data?.error || 'Could not accept'); }
+      });
+      el.querySelectorAll('[data-decline]').forEach(b => b.onclick = async () => {
+        try { await API.post(`/friends/${b.dataset.decline}/decline`, {}); rerun(); }
+        catch (e) { toast(e.data?.error || 'Could not decline'); }
+      });
+      el.querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => {
+        if (!confirm('Remove this friend / request?')) return;
+        try { await API.del(`/friends/${b.dataset.remove}`); rerun(); }
+        catch (e) { toast(e.data?.error || 'Could not remove'); }
+      });
+      el.querySelectorAll('[data-call-kind]').forEach(b => b.onclick = () =>
+        CallUI.start(parseInt(b.dataset.callUser), b.dataset.callKind, b.dataset.callName));
+      const doSearch = async () => {
+        const q = document.getElementById('friendSearch').value.trim();
+        const box = document.getElementById('friendResults');
+        if (q.length < 2) { box.innerHTML = `<div class="muted">Type at least 2 characters.</div>`; return; }
+        try {
+          const { results } = await API.get('/friends/search?q=' + encodeURIComponent(q));
+          box.innerHTML = results.length ? results.map(personRow).join('') : `<div class="muted">No one matched “${esc(q)}”.</div>`;
+          box.querySelectorAll('[data-add]').forEach(b => b.onclick = async () => {
+            try { const r = await API.post('/friends/request', { user_id: parseInt(b.dataset.add) }); toast(r.accepted ? 'You are now friends! 🎉' : 'Friend request sent 👋'); rerun(); }
+            catch (e) { toast(e.data?.error || 'Could not add'); }
+          });
+          box.querySelectorAll('[data-accept]').forEach(b => b.onclick = async () => {
+            try { await API.post(`/friends/${b.dataset.accept}/accept`, {}); toast('You are now friends! 🎉'); rerun(); }
+            catch (e) { toast(e.data?.error || 'Could not accept'); }
+          });
+        } catch (e) { box.innerHTML = `<div class="muted">Search failed — try again.</div>`; }
+      };
+      document.getElementById('friendSearchBtn').onclick = doSearch;
+      document.getElementById('friendSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+    } catch (e) {
+      el.innerHTML = `<div class="card center">Couldn't load friends. <div class="mt"><button class="btn" onclick="Views.friends(document.getElementById('app'))">Retry</button></div></div>`;
+    }
+  },
+
+  /* ---------------- CHAT ---------------- */
+  async chat(el, userId) {
+    userId = parseInt(userId);
+    el.innerHTML = `<div class="card center"><div class="muted">Opening chat…</div></div>`;
+    try {
+      const data = await API.get(`/dm/${userId}`);
+      const friend = data.friend;
+      el.innerHTML = `
+        <div class="card chat-head">
+          <a class="btn small ghost" href="#/friends">←</a>${avatarHtml(friend, 44)}
+          <div class="grow"><div class="name">${esc(friend.display_name)} ${badgesHtml(friend)}</div>
+          <div>${tierChip(data.tier)} <span class="muted">@${esc(friend.username)}</span></div></div>
+          <button class="btn small" id="chatCallAudio">📞</button>
+          <button class="btn small" id="chatCallVideo">🎥</button>
+        </div>
+        <div class="card chat-box" id="chatBox">${data.messages.length ? data.messages.map(msgHtml).join('') : `<div class="muted center">No messages yet — say hi! 👋</div>`}</div>
+        <div class="card chat-input-row"><input id="chatInput" placeholder="Message ${esc(friend.display_name)}…"><button class="btn" id="chatSend">Send</button></div>`;
+      const box = document.getElementById('chatBox');
+      box.scrollTop = box.scrollHeight;
+      const refresh = async () => {
+        try {
+          const d = await API.get(`/dm/${userId}`);
+          const b2 = document.getElementById('chatBox');
+          if (!b2) { if (window._chatTimer) { clearInterval(window._chatTimer); window._chatTimer = null; } return; }
+          const nearBottom = b2.scrollHeight - b2.scrollTop - b2.clientHeight < 140;
+          b2.innerHTML = d.messages.length ? d.messages.map(msgHtml).join('') : `<div class="muted center">No messages yet — say hi! 👋</div>`;
+          if (nearBottom) b2.scrollTop = b2.scrollHeight;
+        } catch (e) { /* ignore */ }
+      };
+      const send = async () => {
+        const inp = document.getElementById('chatInput');
+        const v = inp.value.trim();
+        if (!v) return;
+        inp.value = '';
+        try { await API.post(`/dm/${userId}`, { content: v }); await refresh(); const b3 = document.getElementById('chatBox'); if (b3) b3.scrollTop = b3.scrollHeight; }
+        catch (e) { toast(e.data?.error || 'Could not send'); }
+      };
+      document.getElementById('chatSend').onclick = send;
+      document.getElementById('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+      document.getElementById('chatCallAudio').onclick = () => CallUI.start(userId, 'audio', friend.display_name);
+      document.getElementById('chatCallVideo').onclick = () => CallUI.start(userId, 'video', friend.display_name);
+      if (window._chatTimer) clearInterval(window._chatTimer);
+      window._chatTimer = setInterval(refresh, 3000);
+    } catch (e) {
+      el.innerHTML = `<div class="card center"><h3>💬 Chat unavailable</h3><div class="muted">${esc(e.data?.error || 'You are not friends yet')}</div><div class="mt"><a class="btn" href="#/friends">Back to friends</a></div></div>`;
+    }
   },
 
   /* ---------------- AUTH MODAL ---------------- */
@@ -710,9 +1073,11 @@ const Views = {
         <label class="f hidden" id="userF">Username<input id="aUser" maxlength="24"></label>
         <label class="f hidden" id="nameF">Display name<input id="aName" maxlength="60"></label>
         <label class="f">Password<span class="pw-wrap"><input id="aPass" type="password"><button type="button" id="aPassEye" class="pw-eye" aria-label="Show password" title="Show password">👁️</button></span></label>
+        <label class="check-row"><input id="aRemember" type="checkbox" checked> <span>Keep me signed in</span></label>
         <label class="f hidden" id="typeF">Account type<select id="aType">
           <option value="personal">Personal</option><option value="business">Business</option><option value="creator">Content Creator</option></select></label>
         <button class="btn" id="aGo">Log in</button>
+        <button type="button" class="btn small ghost" id="aForgot">Forgot password?</button>
       </div>`);
     const passEye = document.getElementById('aPassEye');
     passEye.onclick = () => {
@@ -734,6 +1099,7 @@ const Views = {
     };
     document.getElementById('tabLogin').onclick = () => setMode('login');
     document.getElementById('tabReg').onclick = () => setMode('register');
+    document.getElementById('aForgot').onclick = () => Views.forgotModal();
     document.getElementById('aGo').onclick = async () => {
       try {
         const email = document.getElementById('aEmail').value.trim();
@@ -746,12 +1112,58 @@ const Views = {
           display_name: document.getElementById('aName').value.trim(),
           account_type: document.getElementById('aType').value,
         });
-        API.setToken(r.token);
+        API.setToken(r.token, document.getElementById('aRemember').checked);
         closeModal();
         await App.refreshAuth();
         toast(`Welcome, ${r.user.display_name}! ✨`);
         App.route();
       } catch (e) { toast(e.data?.error || 'Authentication failed'); }
+    };
+  },
+
+  /* ---------------- FORGOT PASSWORD ---------------- */
+  forgotModal() {
+    openModal(`<h3 style="margin-top:0">🔑 Reset your password</h3>
+      <div class="form-grid">
+        <label class="f">Email<input id="fEmail" type="email"></label>
+        <button class="btn" id="fRequest">Request reset code</button>
+        <div class="muted">The app owner sees your request in the Admin tab and gives you a 6-digit code (good for 30 minutes). Ask them for it, then finish here.</div>
+        <label class="f hidden" id="fCodeF">Reset code<input id="fCode" inputmode="numeric" maxlength="6"></label>
+        <label class="f hidden" id="fPassF">New password<span class="pw-wrap"><input id="fPass" type="password"><button type="button" id="fPassEye" class="pw-eye" aria-label="Show password" title="Show password">👁️</button></span></label>
+        <button class="btn hidden" id="fReset">Set new password</button>
+        <button class="btn small ghost" id="fBack">← Back to log in</button>
+      </div>`);
+    const eye = document.getElementById('fPassEye');
+    eye.onclick = () => {
+      const inp = document.getElementById('fPass');
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      eye.textContent = show ? '🙈' : '👁️';
+      inp.focus();
+    };
+    document.getElementById('fBack').onclick = () => Views.authModal();
+    document.getElementById('fRequest').onclick = async () => {
+      const email = document.getElementById('fEmail').value.trim();
+      if (!email) { toast('Enter your email first'); return; }
+      try {
+        await API.post('/auth/forgot', { email });
+        ['fCodeF', 'fPassF', 'fReset'].forEach(id => document.getElementById(id).classList.remove('hidden'));
+        toast('Request sent — ask the app owner for your code 🔑');
+      } catch (e) { toast('Could not send the request'); }
+    };
+    document.getElementById('fReset').onclick = async () => {
+      try {
+        const r = await API.post('/auth/reset', {
+          email: document.getElementById('fEmail').value.trim(),
+          code: document.getElementById('fCode').value.trim(),
+          new_password: document.getElementById('fPass').value,
+        });
+        API.setToken(r.token);
+        closeModal();
+        await App.refreshAuth();
+        toast(`Password updated — welcome back, ${r.user.display_name}! 🎉`);
+        App.route();
+      } catch (e) { toast(e.data?.error || 'Reset failed'); }
     };
   },
 };
