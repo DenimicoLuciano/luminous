@@ -88,6 +88,7 @@ const App = {
     const el = document.getElementById('app');
     const hash = location.hash || '#/';
     if (window._chatTimer && !hash.startsWith('#/chat/')) { clearInterval(window._chatTimer); window._chatTimer = null; }
+    if (window._liveCleanup && !hash.startsWith('#/live/')) { try { window._liveCleanup(); } catch (e) {} window._liveCleanup = null; }
     this.renderNav();
     window.scrollTo(0, 0);
     const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat'];
