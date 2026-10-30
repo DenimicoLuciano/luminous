@@ -33,7 +33,8 @@ function badgesHtml(u) {
 const linkify = (s) => s.replace(/(https?:\/\/[^\s<]+)/g, (u) => '<a href="' + u + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline">' + u + '</a>');
 let ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }];
 let ADSTERRA_KEY = null;
-const CONFIG_READY = fetch('/api/config').then(r => r.json()).then(c => { if (c && Array.isArray(c.iceServers) && c.iceServers.length) ICE_SERVERS = c.iceServers; if (c && c.adsterraKey) ADSTERRA_KEY = c.adsterraKey; }).catch(() => {});
+let ADSTERRA_SRC = null;
+const CONFIG_READY = fetch('/api/config').then(r => r.json()).then(c => { if (c && Array.isArray(c.iceServers) && c.iceServers.length) ICE_SERVERS = c.iceServers; if (c && c.adsterraKey) ADSTERRA_KEY = c.adsterraKey; if (c && c.adsterraSrc) ADSTERRA_SRC = c.adsterraSrc; }).catch(() => {});
 function postCard(p) {
   const ad = p.is_ad || p._adSlot;
   return `<div class="card${ad ? ' ad-card' : ''}">
@@ -64,7 +65,7 @@ function mountNetAds(root) {
     window.atOptions = { key: ADSTERRA_KEY, format: 'iframe', height: 250, width: 300, params: {} };
     const sc = document.createElement('script');
     sc.async = true;
-    sc.src = 'https://www.highperformanceformat.com/' + ADSTERRA_KEY + '/invoke.js';
+    sc.src = ADSTERRA_SRC || ('https://bicea.org/22/' + ADSTERRA_KEY);
     slot.appendChild(sc);
   });
 }
