@@ -709,11 +709,21 @@ const Views = {
         <label class="f" id="emailF">Email<input id="aEmail" type="email"></label>
         <label class="f hidden" id="userF">Username<input id="aUser" maxlength="24"></label>
         <label class="f hidden" id="nameF">Display name<input id="aName" maxlength="60"></label>
-        <label class="f">Password<input id="aPass" type="password"></label>
+        <label class="f">Password<span class="pw-wrap"><input id="aPass" type="password"><button type="button" id="aPassEye" class="pw-eye" aria-label="Show password" title="Show password">👁️</button></span></label>
         <label class="f hidden" id="typeF">Account type<select id="aType">
           <option value="personal">Personal</option><option value="business">Business</option><option value="creator">Content Creator</option></select></label>
         <button class="btn" id="aGo">Log in</button>
       </div>`);
+    const passEye = document.getElementById('aPassEye');
+    passEye.onclick = () => {
+      const inp = document.getElementById('aPass');
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      passEye.textContent = show ? '🙈' : '👁️';
+      passEye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      passEye.title = show ? 'Hide password' : 'Show password';
+      inp.focus();
+    };
     let mode = 'login';
     const setMode = (m) => {
       mode = m;
