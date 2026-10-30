@@ -151,7 +151,17 @@ function optionalAuth(req, res, next) {
 }
 
 app.get('/api/config', (req, res) => {
-  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous' });
+  // WebRTC ICE: STUN always; a TURN relay joins when its credentials are set in the environment.
+  // TURN is what lets live video punch through strict home/mobile networks.
+  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+  if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_PASSWORD) {
+    iceServers.push({
+      urls: process.env.TURN_URL.split(',').map(s => s.trim()).filter(Boolean),
+      username: process.env.TURN_USERNAME,
+      credential: process.env.TURN_PASSWORD,
+    });
+  }
+  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous', iceServers, turnConfigured: iceServers.length > 1 });
 });
 
 app.post('/api/auth/register', (req, res) => {
@@ -1160,21 +1170,21 @@ function requireAcceptedFriend(meId, otherId) {
 app.get('/api/dm/:userId', authRequired, (req, res) => {
   const other = getUserById.get(parseInt(req.params.userId));
   if (!other) return res.status(404).json({ error: 'User not found' });
-  const f = requireAcceptedFriend(req.user.id, other.id);
-  if (!f) return res.status(403).json({ error: 'You are not friends yet' });
+  // DMs are open: anyone can open a conversation (friendship tiers still tracked for friends)
+  const f = friendshipBetween(req.user.id, other.id);
+  const accepted = f && f.status === 'accepted' ? f : null;
   db.prepare("UPDATE dm_messages SET read_at = datetime('now') WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL")
     .run(other.id, req.user.id);
   const messages = db.prepare(`SELECT * FROM dm_messages
     WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
     ORDER BY id DESC LIMIT 100`).all(req.user.id, other.id, other.id, req.user.id).reverse();
-  res.json({ friend: publicUser(other), tier: friendTier(f.accepted_at), messages });
+  res.json({ friend: publicUser(other), tier: accepted ? friendTier(accepted.accepted_at) : friendTier(new Date().toISOString()), messages });
 });
 
 app.post('/api/dm/:userId', authRequired, (req, res) => {
   const other = getUserById.get(parseInt(req.params.userId));
   if (!other) return res.status(404).json({ error: 'User not found' });
-  if (!requireAcceptedFriend(req.user.id, other.id))
-    return res.status(403).json({ error: 'You are not friends yet' });
+  // DMs are open: anyone can message anyone — no accepted-friendship requirement
   const content = String((req.body || {}).content || '').trim().slice(0, 1000);
   if (!content) return res.status(400).json({ error: 'Message is empty' });
   const r = db.prepare('INSERT INTO dm_messages (sender_id, recipient_id, content) VALUES (?,?,?)')
