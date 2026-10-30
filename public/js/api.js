@@ -1,6 +1,6 @@
 // Luminous API client
 const API = {
-  token: localStorage.getItem('luminous_token') || null,
+  token: sessionStorage.getItem('luminous_token') || localStorage.getItem('luminous_token') || null,
 
   async req(method, path, body, isForm = false) {
     const headers = {};
@@ -24,9 +24,10 @@ const API = {
   del: (p) => API.req('DELETE', p),
   upload: (p, formData) => API.req('POST', p, formData, true),
 
-  setToken(t) {
+  setToken(t, remember = true) {
     this.token = t;
-    if (t) localStorage.setItem('luminous_token', t);
-    else localStorage.removeItem('luminous_token');
+    sessionStorage.removeItem('luminous_token');
+    localStorage.removeItem('luminous_token');
+    if (t) (remember ? localStorage : sessionStorage).setItem('luminous_token', t);
   },
 };
