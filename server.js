@@ -188,6 +188,38 @@ app.post('/api/auth/logout', authRequired, (req, res) => {
   res.json({ ok: true });
 });
 
+// Forgot password: the user files a request; the app owner (developer) reads
+// the one-time code in the Admin tab and passes it to them out-of-band.
+app.post('/api/auth/forgot', (req, res) => {
+  const email = String((req.body || {}).email || '').trim();
+  const u = email && getUserByEmail.get(email);
+  if (u) {
+    db.prepare("DELETE FROM password_resets WHERE user_id = ? AND status = 'pending'").run(u.id);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    db.prepare("INSERT INTO password_resets (user_id, code, expires_at) VALUES (?,?,datetime('now','+30 minutes'))").run(u.id, code);
+  }
+  res.json({ ok: true }); // same answer either way — never reveal whether the email exists
+});
+
+app.post('/api/auth/reset', (req, res) => {
+  const { email, code, new_password } = req.body || {};
+  if (!new_password || String(new_password).length < 6)
+    return res.status(400).json({ error: 'New password must be at least 6 characters' });
+  const u = email && getUserByEmail.get(String(email).trim());
+  if (!u) return res.status(400).json({ error: 'Invalid code' });
+  const r = db.prepare(`SELECT * FROM password_resets WHERE user_id = ? AND status = 'pending'
+    AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1`).get(u.id);
+  if (!r || String(code || '').trim() !== r.code)
+    return res.status(400).json({ error: 'Invalid or expired code' });
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(String(new_password), 10), u.id);
+  db.prepare("UPDATE password_resets SET status = 'used' WHERE id = ?").run(r.id);
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+  ensureDeveloperRole(u);
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare('INSERT INTO sessions (token, user_id) VALUES (?,?)').run(token, u.id);
+  res.json({ ok: true, token, user: publicUser(getUserById.get(u.id)) });
+});
+
 app.get('/api/auth/me', authRequired, (req, res) => {
   ensureWallet(req.user.id);
   const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
@@ -311,10 +343,21 @@ app.post('/api/stories/:id/replies', authRequired, (req, res) => {
 
 // ---------- lums ----------
 app.get('/api/lums', optionalAuth, (req, res) => {
-  const rows = db.prepare(`
-    SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role
-    FROM lums l JOIN users u ON u.id = l.user_id
-    ORDER BY l.created_at DESC LIMIT 50`).all();
+  const q = String(req.query.q || '').trim().toLowerCase();
+  let rows;
+  if (q) {
+    const like = '%' + q.replace(/[%_]/g, '') + '%';
+    rows = db.prepare(`
+      SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role
+      FROM lums l JOIN users u ON u.id = l.user_id
+      WHERE LOWER(l.caption) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(u.display_name) LIKE ?
+      ORDER BY l.created_at DESC LIMIT 50`).all(like, like, like);
+  } else {
+    rows = db.prepare(`
+      SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role
+      FROM lums l JOIN users u ON u.id = l.user_id
+      ORDER BY l.created_at DESC LIMIT 50`).all();
+  }
   res.json({ lums: rows });
 });
 
@@ -627,6 +670,25 @@ function developerRequired(req, res, next) {
   next();
 }
 
+app.get('/api/admin/password-resets', authRequired, developerRequired, (req, res) => {
+  const rows = db.prepare(`SELECT pr.id, pr.created_at, pr.expires_at, u.username, u.display_name, u.email
+    FROM password_resets pr JOIN users u ON u.id = pr.user_id
+    WHERE pr.status = 'pending' AND pr.expires_at > datetime('now')
+    ORDER BY pr.id DESC`).all();
+  res.json({ resets: rows });
+});
+
+app.post('/api/admin/password-resets/:id/code', authRequired, developerRequired, (req, res) => {
+  const r = db.prepare("SELECT code FROM password_resets WHERE id = ? AND status = 'pending'").get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Request not found' });
+  res.json({ code: r.code });
+});
+
+app.post('/api/admin/password-resets/:id/dismiss', authRequired, developerRequired, (req, res) => {
+  db.prepare('DELETE FROM password_resets WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 app.get('/api/admin/stats', authRequired, developerRequired, (req, res) => {
   const count = (sql) => db.prepare(sql).get().c;
   res.json({
@@ -728,6 +790,244 @@ app.post('/api/profile/verify', authRequired, (req, res) => {
   db.prepare('UPDATE users SET verified = 1 WHERE id = ?').run(req.user.id);
   const ms = unlockMilestone(req.user.id, 'creator-approved');
   res.json({ ok: true, milestone: ms });
+});
+
+// ---------- friends, direct messages, calls ----------
+// Friendship levels grow with time: everyone starts as Acquaintances,
+// then Friends (7+ days), Close Friends (30+ days), Best Friends (90+ days).
+function friendTier(acceptedAt) {
+  const t = new Date(String(acceptedAt).replace(' ', 'T') + 'Z').getTime();
+  const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+  if (days >= 90) return { key: 'best', label: 'Best Friends', emoji: '⭐', days, next: null };
+  if (days >= 30) return { key: 'close', label: 'Close Friends', emoji: '💛', days, next: { label: 'Best Friends', inDays: 90 - days } };
+  if (days >= 7) return { key: 'friend', label: 'Friends', emoji: '🙂', days, next: { label: 'Close Friends', inDays: 30 - days } };
+  return { key: 'acquaintance', label: 'Acquaintances', emoji: '🤝', days, next: { label: 'Friends', inDays: 7 - days } };
+}
+function friendshipBetween(a, b) {
+  return db.prepare(`SELECT * FROM friendships
+    WHERE (requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)`).get(a, b, b, a);
+}
+function friendSummary(f, meId) {
+  const otherId = f.requester_id === meId ? f.addressee_id : f.requester_id;
+  const other = getUserById.get(otherId);
+  const last = db.prepare(`SELECT * FROM dm_messages
+    WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+    ORDER BY id DESC LIMIT 1`).get(meId, otherId, otherId, meId);
+  const unread = db.prepare(`SELECT COUNT(*) c FROM dm_messages
+    WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL`).get(otherId, meId).c;
+  return {
+    friendship_id: f.id, status: f.status, accepted_at: f.accepted_at, created_at: f.created_at,
+    i_requested: f.requester_id === meId,
+    user: publicUser(other),
+    tier: f.status === 'accepted' ? friendTier(f.accepted_at) : null,
+    last_message: last ? { content: last.content, created_at: last.created_at, from_me: last.sender_id === meId } : null,
+    unread,
+  };
+}
+
+app.get('/api/friends', authRequired, (req, res) => {
+  const rows = db.prepare('SELECT * FROM friendships WHERE requester_id = ? OR addressee_id = ? ORDER BY id DESC')
+    .all(req.user.id, req.user.id);
+  const friends = [], incoming = [], outgoing = [];
+  for (const f of rows) {
+    const s = friendSummary(f, req.user.id);
+    if (f.status === 'accepted') friends.push(s);
+    else if (f.addressee_id === req.user.id) incoming.push(s);
+    else outgoing.push(s);
+  }
+  const rank = { best: 0, close: 1, friend: 2, acquaintance: 3 };
+  friends.sort((a, b) => (rank[a.tier.key] - rank[b.tier.key]) || ((b.last_message?.created_at || '') < (a.last_message?.created_at || '') ? -1 : 1));
+  res.json({ friends, incoming, outgoing });
+});
+
+app.get('/api/friends/search', authRequired, (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  if (q.length < 2) return res.json({ results: [] });
+  const like = '%' + q.replace(/[%_]/g, '') + '%';
+  const users = db.prepare(`SELECT * FROM users WHERE id != ? AND (username LIKE ? OR LOWER(display_name) LIKE ?)
+    ORDER BY is_ai DESC, username LIMIT 20`).all(req.user.id, like, like);
+  const results = users.map(u => {
+    const f = friendshipBetween(req.user.id, u.id);
+    let rel = 'none';
+    if (f) rel = f.status === 'accepted' ? 'friends' : (f.requester_id === req.user.id ? 'pending_out' : 'pending_in');
+    return { user: publicUser(u), rel, friendship_id: f ? f.id : null };
+  });
+  res.json({ results });
+});
+
+app.post('/api/friends/request', authRequired, (req, res) => {
+  const targetId = parseInt((req.body || {}).user_id);
+  const target = targetId && getUserById.get(targetId);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot add yourself' });
+  const existing = friendshipBetween(req.user.id, target.id);
+  if (existing) {
+    if (existing.status === 'accepted') return res.status(409).json({ error: 'Already friends' });
+    if (existing.addressee_id === req.user.id) { // they already asked me — accept it
+      db.prepare("UPDATE friendships SET status = 'accepted', accepted_at = datetime('now') WHERE id = ?").run(existing.id);
+      return res.json({ ok: true, accepted: true, friendship: friendSummary({ ...existing, status: 'accepted', accepted_at: new Date().toISOString() }, req.user.id) });
+    }
+    return res.status(409).json({ error: 'Request already sent' });
+  }
+  const r = db.prepare('INSERT INTO friendships (requester_id, addressee_id) VALUES (?,?)').run(req.user.id, target.id);
+  if (target.is_ai) { // AI demo accounts accept right away so the tab feels alive
+    db.prepare("UPDATE friendships SET status = 'accepted', accepted_at = datetime('now') WHERE id = ?").run(r.lastInsertRowid);
+    const f = db.prepare('SELECT * FROM friendships WHERE id = ?').get(r.lastInsertRowid);
+    return res.json({ ok: true, accepted: true, friendship: friendSummary(f, req.user.id) });
+  }
+  const f = db.prepare('SELECT * FROM friendships WHERE id = ?').get(r.lastInsertRowid);
+  res.json({ ok: true, accepted: false, friendship: friendSummary(f, req.user.id) });
+});
+
+app.post('/api/friends/:id/accept', authRequired, (req, res) => {
+  const f = db.prepare('SELECT * FROM friendships WHERE id = ?').get(req.params.id);
+  if (!f || f.addressee_id !== req.user.id || f.status !== 'pending')
+    return res.status(404).json({ error: 'Request not found' });
+  db.prepare("UPDATE friendships SET status = 'accepted', accepted_at = datetime('now') WHERE id = ?").run(f.id);
+  res.json({ ok: true, friendship: friendSummary(db.prepare('SELECT * FROM friendships WHERE id = ?').get(f.id), req.user.id) });
+});
+
+app.post('/api/friends/:id/decline', authRequired, (req, res) => {
+  const f = db.prepare('SELECT * FROM friendships WHERE id = ?').get(req.params.id);
+  if (!f || f.addressee_id !== req.user.id || f.status !== 'pending')
+    return res.status(404).json({ error: 'Request not found' });
+  db.prepare('DELETE FROM friendships WHERE id = ?').run(f.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/friends/:id', authRequired, (req, res) => {
+  const f = db.prepare('SELECT * FROM friendships WHERE id = ?').get(req.params.id);
+  if (!f || (f.requester_id !== req.user.id && f.addressee_id !== req.user.id))
+    return res.status(404).json({ error: 'Friendship not found' });
+  db.prepare('DELETE FROM friendships WHERE id = ?').run(f.id);
+  res.json({ ok: true });
+});
+
+// ---------- direct messages ----------
+const AI_DM_REPLIES = [
+  'Hey! Good to hear from you 😊', 'That sounds awesome!', 'Tell me more!',
+  'Haha, love that 😄', 'For real? That is wild', 'Let’s catch up properly soon!',
+  'Appreciate you reaching out 🙌', 'What have you been working on lately?',
+  'Nice! Keep me posted 👀', 'Always good chatting with you!',
+];
+function requireAcceptedFriend(meId, otherId) {
+  const f = friendshipBetween(meId, otherId);
+  return f && f.status === 'accepted' ? f : null;
+}
+
+app.get('/api/dm/:userId', authRequired, (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  const f = requireAcceptedFriend(req.user.id, other.id);
+  if (!f) return res.status(403).json({ error: 'You are not friends yet' });
+  db.prepare("UPDATE dm_messages SET read_at = datetime('now') WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL")
+    .run(other.id, req.user.id);
+  const messages = db.prepare(`SELECT * FROM dm_messages
+    WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+    ORDER BY id DESC LIMIT 100`).all(req.user.id, other.id, other.id, req.user.id).reverse();
+  res.json({ friend: publicUser(other), tier: friendTier(f.accepted_at), messages });
+});
+
+app.post('/api/dm/:userId', authRequired, (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  if (!requireAcceptedFriend(req.user.id, other.id))
+    return res.status(403).json({ error: 'You are not friends yet' });
+  const content = String((req.body || {}).content || '').trim().slice(0, 1000);
+  if (!content) return res.status(400).json({ error: 'Message is empty' });
+  const r = db.prepare('INSERT INTO dm_messages (sender_id, recipient_id, content) VALUES (?,?,?)')
+    .run(req.user.id, other.id, content);
+  const msg = db.prepare('SELECT * FROM dm_messages WHERE id = ?').get(r.lastInsertRowid);
+  if (other.is_ai) { // demo friends write back so chats never feel one-sided
+    const reply = AI_DM_REPLIES[Math.floor(Math.random() * AI_DM_REPLIES.length)];
+    const fromId = other.id, toId = req.user.id;
+    setTimeout(() => {
+      try { db.prepare('INSERT INTO dm_messages (sender_id, recipient_id, content) VALUES (?,?,?)').run(fromId, toId, reply); } catch (e) {}
+    }, 2500);
+  }
+  res.json({ ok: true, message: msg });
+});
+
+// ---------- calls (WebRTC signaling over REST polling) ----------
+function callView(c, meId) {
+  const other = getUserById.get(c.caller_id === meId ? c.callee_id : c.caller_id);
+  return {
+    id: c.id, kind: c.kind, status: c.status, offer: c.offer, answer: c.answer,
+    i_am_caller: c.caller_id === meId, created_at: c.created_at,
+    other: publicUser(other),
+  };
+}
+function pruneStaleCalls() {
+  db.prepare("UPDATE calls SET status = 'missed', ended_at = datetime('now') WHERE status = 'ringing' AND created_at < datetime('now','-75 seconds')").run();
+}
+
+app.post('/api/calls', authRequired, (req, res) => {
+  const { user_id, kind } = req.body || {};
+  const other = getUserById.get(parseInt(user_id));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  if (!requireAcceptedFriend(req.user.id, other.id))
+    return res.status(403).json({ error: 'You are not friends yet' });
+  pruneStaleCalls();
+  const busy = db.prepare("SELECT 1 FROM calls WHERE status IN ('ringing','ongoing') AND (caller_id = ? OR callee_id = ? OR caller_id = ? OR callee_id = ?) LIMIT 1")
+    .get(req.user.id, req.user.id, other.id, other.id);
+  if (busy) return res.status(409).json({ error: 'One of you is already on a call' });
+  const r = db.prepare('INSERT INTO calls (caller_id, callee_id, kind) VALUES (?,?,?)')
+    .run(req.user.id, other.id, kind === 'video' ? 'video' : 'audio');
+  res.json({ ok: true, call: callView(db.prepare('SELECT * FROM calls WHERE id = ?').get(r.lastInsertRowid), req.user.id) });
+});
+
+app.get('/api/calls/incoming', authRequired, (req, res) => {
+  pruneStaleCalls();
+  const c = db.prepare("SELECT * FROM calls WHERE callee_id = ? AND status = 'ringing' ORDER BY id DESC LIMIT 1").get(req.user.id);
+  res.json({ call: c ? callView(c, req.user.id) : null });
+});
+
+app.get('/api/calls/:id', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || (c.caller_id !== req.user.id && c.callee_id !== req.user.id))
+    return res.status(404).json({ error: 'Call not found' });
+  const candidates = db.prepare('SELECT candidate FROM call_candidates WHERE call_id = ? AND from_user_id != ? ORDER BY id')
+    .all(c.id, req.user.id).map(r => r.candidate);
+  res.json({ call: callView(c, req.user.id), candidates });
+});
+
+app.post('/api/calls/:id/offer', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || c.caller_id !== req.user.id) return res.status(404).json({ error: 'Call not found' });
+  db.prepare('UPDATE calls SET offer = ? WHERE id = ?').run(String((req.body || {}).sdp || ''), c.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/calls/:id/answer', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || c.callee_id !== req.user.id || c.status !== 'ringing') return res.status(404).json({ error: 'Call not found' });
+  db.prepare("UPDATE calls SET answer = ?, status = 'ongoing' WHERE id = ?").run(String((req.body || {}).sdp || ''), c.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/calls/:id/candidates', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || (c.caller_id !== req.user.id && c.callee_id !== req.user.id))
+    return res.status(404).json({ error: 'Call not found' });
+  const cand = (req.body || {}).candidate;
+  if (cand) db.prepare('INSERT INTO call_candidates (call_id, from_user_id, candidate) VALUES (?,?,?)')
+    .run(c.id, req.user.id, JSON.stringify(cand));
+  res.json({ ok: true });
+});
+
+app.post('/api/calls/:id/decline', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || c.callee_id !== req.user.id) return res.status(404).json({ error: 'Call not found' });
+  db.prepare("UPDATE calls SET status = 'declined', ended_at = datetime('now') WHERE id = ?").run(c.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/calls/:id/end', authRequired, (req, res) => {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (!c || (c.caller_id !== req.user.id && c.callee_id !== req.user.id))
+    return res.status(404).json({ error: 'Call not found' });
+  db.prepare("UPDATE calls SET status = 'ended', ended_at = datetime('now') WHERE id = ?").run(c.id);
+  res.json({ ok: true });
 });
 
 // ---------- static frontend ----------
