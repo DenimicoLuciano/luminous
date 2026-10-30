@@ -42,7 +42,7 @@ async function callAI(system, messages) {
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: 'system', content: system }, ...messages.slice(-20)],
+      messages: [{ role: 'system', content: system }, ...messages.slice(-300)],
       max_tokens: 400,
       temperature: 0.8,
     }),
@@ -266,6 +266,49 @@ app.post('/api/posts', authRequired, upload.single('image'), (req, res) => {
   const count = db.prepare('SELECT COUNT(*) c FROM posts WHERE user_id = ? AND is_ad = 0').get(req.user.id).c;
   if (count >= 10) unlockMilestone(req.user.id, 'prolific');
   res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+// ---------- Planned (scheduled) posts: publish automatically at the chosen date & time ----------
+function promoteDuePosts() {
+  try {
+    const due = db.prepare("SELECT * FROM scheduled_posts WHERE publish_at <= datetime('now') ORDER BY publish_at").all();
+    for (const s of due) {
+      db.prepare('INSERT INTO posts (user_id, type, content, image_url, created_at) VALUES (?,?,?,?,?)')
+        .run(s.user_id, s.image_url ? 'photo' : 'text', s.content, s.image_url, s.publish_at);
+      db.prepare('DELETE FROM scheduled_posts WHERE id = ?').run(s.id);
+      addXp(s.user_id, 10);
+      unlockMilestone(s.user_id, 'first-post');
+      const c = db.prepare('SELECT COUNT(*) c FROM posts WHERE user_id = ? AND is_ad = 0').get(s.user_id).c;
+      if (c >= 10) unlockMilestone(s.user_id, 'prolific');
+    }
+    if (due.length) console.log(`🕒 Promoted ${due.length} planned post(s)`);
+  } catch (e) { console.error('promoteDuePosts', e); }
+}
+setInterval(promoteDuePosts, 20000);
+setTimeout(promoteDuePosts, 5000);
+
+app.post('/api/posts/schedule', authRequired, upload.single('image'), (req, res) => {
+  const content = (req.body.content || '').slice(0, 2000);
+  if (!content && !req.file) return res.status(400).json({ error: 'Post needs text or a photo' });
+  const when = new Date(req.body.publish_at || '');
+  if (isNaN(when) || when.getTime() < Date.now() + 30000)
+    return res.status(400).json({ error: 'Pick a date and time at least a minute from now' });
+  const iso = when.toISOString().slice(0, 19).replace('T', ' ');
+  const image_url = req.file ? '/uploads/' + req.file.filename : null;
+  const r = db.prepare('INSERT INTO scheduled_posts (user_id, content, image_url, publish_at) VALUES (?,?,?,?)')
+    .run(req.user.id, content, image_url, iso);
+  res.json({ ok: true, id: r.lastInsertRowid, publish_at: iso });
+});
+
+app.get('/api/posts/scheduled', authRequired, (req, res) => {
+  const rows = db.prepare('SELECT id, content, image_url, publish_at, created_at FROM scheduled_posts WHERE user_id = ? ORDER BY publish_at').all(req.user.id);
+  res.json({ scheduled: rows });
+});
+
+app.delete('/api/posts/scheduled/:id', authRequired, (req, res) => {
+  const r = db.prepare('DELETE FROM scheduled_posts WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  if (!r.changes) return res.status(404).json({ error: 'Planned post not found' });
+  res.json({ ok: true });
 });
 
 app.post('/api/posts/:id/view', optionalAuth, (req, res) => {
