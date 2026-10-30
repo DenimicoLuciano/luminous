@@ -216,6 +216,23 @@ const CallUI = {
   },
 };
 
+async function loadPlannedPosts() {
+  const box = document.getElementById('planList');
+  if (!box || !App.user) return;
+  try {
+    const { scheduled } = await API.get('/posts/scheduled');
+    box.innerHTML = scheduled.length ? `<div class="card" style="margin-top:12px"><h4 style="margin:0 0 8px">🕒 Your planned posts</h4>` +
+      scheduled.map(s => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line, #333)">
+        <div class="grow"><div>${esc((s.content || '📷 Photo post').slice(0, 80))}</div>
+        <div class="post-time">Publishes ${esc(new Date(s.publish_at.replace(' ', 'T') + 'Z').toLocaleString())}</div></div>
+        <button class="btn small ghost" data-cancel-plan="${s.id}">Cancel</button></div>`).join('') + `</div>` : '';
+    box.querySelectorAll('[data-cancel-plan]').forEach(b => b.onclick = async () => {
+      try { await API.del('/posts/scheduled/' + b.dataset.cancelPlan); toast('Planned post cancelled'); loadPlannedPosts(); }
+      catch (e) { toast('Could not cancel'); }
+    });
+  } catch (e) { box.innerHTML = ''; }
+}
+
 const Views = {
 
   /* ---------------- FEED ---------------- */
@@ -771,7 +788,10 @@ const Views = {
       if (t === 'post') ctab.innerHTML = `
         <div class="form-grid"><textarea id="pText" maxlength="2000" placeholder="What's on your mind?"></textarea>
         <label class="f">Photo (optional)<input id="pImg" type="file" accept="image/*"></label>
-        <button class="btn" id="pGo">Publish post</button></div>`;
+        <label class="check-row"><input id="pPlan" type="checkbox"> <span>🕒 Plan for a specific date &amp; time</span></label>
+        <label class="f hidden" id="pWhenF">Publish at<input id="pWhen" type="datetime-local"></label>
+        <button class="btn" id="pGo">Publish post</button></div>
+        <div id="planList"></div>`;
       if (t === 'story') ctab.innerHTML = `
         <div class="form-grid"><textarea id="sText" maxlength="500" placeholder="Story text…"></textarea>
         <label class="f">Image (optional)<input id="sImg" type="file" accept="image/*"></label>
@@ -781,6 +801,14 @@ const Views = {
         <div class="form-grid"><input id="lCap" maxlength="500" placeholder="Caption…">
         <label class="f">Video<input id="lVid" type="file" accept="video/*"></label>
         <button class="btn" id="lGo">Upload Lum</button></div>`;
+      const planBox = document.getElementById('pPlan');
+      if (planBox) {
+        planBox.onchange = () => {
+          document.getElementById('pWhenF').classList.toggle('hidden', !planBox.checked);
+          document.getElementById('pGo').textContent = planBox.checked ? '🕒 Plan post' : 'Publish post';
+        };
+        loadPlannedPosts();
+      }
       const go = async (btnId, fn) => {
         const b = document.getElementById(btnId);
         if (b) b.onclick = async () => { b.disabled = true; b.textContent = 'Publishing…'; try { await fn(); } finally { b.disabled = false; } };
@@ -789,6 +817,20 @@ const Views = {
         const fd = new FormData();
         fd.append('content', document.getElementById('pText').value);
         const f = document.getElementById('pImg').files[0]; if (f) fd.append('image', f);
+        const plan = document.getElementById('pPlan');
+        if (plan && plan.checked) {
+          const w = document.getElementById('pWhen').value;
+          if (!w) { toast('Pick the date and time first 🕒'); return; }
+          fd.append('publish_at', new Date(w).toISOString());
+          try {
+            const r = await API.upload('/posts/schedule', fd);
+            toast(`Planned for ${new Date(r.publish_at.replace(' ', 'T') + 'Z').toLocaleString()} 🕒`);
+            document.getElementById('pText').value = '';
+            document.getElementById('pGo').textContent = '🕒 Plan post';
+            loadPlannedPosts();
+          } catch (e) { toast(e.data?.error || 'Could not plan the post'); document.getElementById('pGo').textContent = '🕒 Plan post'; }
+          return;
+        }
         try { await API.upload('/posts', fd); toast('Posted! ✨'); App.checkMilestones(); location.hash = '#/'; }
         catch (e) { toast(e.data?.error || 'Could not publish'); }
       });
