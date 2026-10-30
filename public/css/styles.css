@@ -220,5 +220,9 @@ textarea { resize: vertical; min-height: 80px; }
   border-radius: 14px; padding: 12px 14px; font-size: 14px; margin-bottom: 12px; }
 .form-grid { display: grid; gap: 10px; }
 label.f { font-size: 13px; font-weight: 700; color: var(--muted); display: grid; gap: 6px; }
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { width: 100%; padding-right: 44px; box-sizing: border-box; }
+.pw-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 17px; line-height: 1; padding: 6px; opacity: .75; }
+.pw-eye:hover { opacity: 1; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .hidden { display: none !important; }
