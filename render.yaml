@@ -23,3 +23,5 @@ services:
         sync: false # set in the Render dashboard — AI mentors/companions need this
       - key: OPENAI_MODEL
         value: gpt-4o-mini
+      - key: AI_BASE_URL
+        sync: false # optional: point at another OpenAI-compatible endpoint (e.g. Gemini free tier)
