@@ -224,5 +224,45 @@ label.f { font-size: 13px; font-weight: 700; color: var(--muted); display: grid;
 .pw-wrap input { width: 100%; padding-right: 44px; box-sizing: border-box; }
 .pw-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 17px; line-height: 1; padding: 6px; opacity: .75; }
 .pw-eye:hover { opacity: 1; }
+
+/* friends / discover / chat / calls */
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.check-row input { width: 17px; height: 17px; accent-color: #a855f7; cursor: pointer; }
+.search-row { display: flex; gap: 8px; }
+.search-row input { flex: 1; }
+.section-title { margin: 18px 2px 10px; }
+.friend-row { display: flex; gap: 10px; align-items: center; padding: 8px 0; }
+.friend-card { padding-bottom: 12px; }
+.friend-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.tier-line { margin-top: 4px; font-size: 12px; }
+.tier-chip { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; color: #fff; background: #64748b; }
+.tier-chip.tier-acquaintance { background: #64748b; }
+.tier-chip.tier-friend { background: linear-gradient(135deg, #22c55e, #16a34a); }
+.tier-chip.tier-close { background: linear-gradient(135deg, #eab308, #f59e0b); }
+.tier-chip.tier-best { background: linear-gradient(135deg, #a855f7, #ec4899); }
+.badge.unread { background: #ef4444; }
+.lum-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.lum-mini { border-radius: var(--radius); overflow: hidden; position: relative; background: #000; display: block; height: 220px; }
+.lum-mini video { width: 100%; height: 100%; object-fit: cover; }
+.lum-mini-fallback { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 44px; }
+.lum-mini-cap { position: absolute; bottom: 0; left: 0; right: 0; padding: 22px 10px 8px; color: #fff; font-size: 12px; background: linear-gradient(transparent, rgba(0,0,0,.75)); }
+.chat-head { display: flex; gap: 10px; align-items: center; }
+.chat-box { display: flex; flex-direction: column; gap: 8px; max-height: 52vh; overflow-y: auto; }
+.msg { display: flex; flex-direction: column; max-width: 78%; }
+.msg.me { align-self: flex-end; align-items: flex-end; }
+.msg.them { align-self: flex-start; align-items: flex-start; }
+.msg .bubble { padding: 9px 13px; border-radius: 16px; background: var(--card-border); color: var(--text); overflow-wrap: anywhere; }
+.msg.me .bubble { background: var(--grad); color: #fff; }
+.msg-time { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.chat-input-row { display: flex; gap: 8px; }
+.chat-input-row input { flex: 1; }
+#callOverlay { position: fixed; inset: 0; z-index: 200; background: rgba(5,5,12,.94); display: flex; align-items: center; justify-content: center; }
+.call-box { position: relative; width: min(94vw, 520px); height: min(82vh, 640px); border-radius: 20px; overflow: hidden; background: #0b0b14; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #fff; padding: 16px; }
+#callRemote { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#callLocal { position: absolute; top: 12px; right: 12px; width: 104px; height: 140px; object-fit: cover; border-radius: 12px; border: 2px solid rgba(255,255,255,.5); z-index: 2; }
+.call-avatar { font-size: 74px; }
+.call-name { font-size: 21px; font-weight: 800; z-index: 2; text-shadow: 0 1px 6px rgba(0,0,0,.6); }
+.call-status { color: #cbd5e1; z-index: 2; text-shadow: 0 1px 6px rgba(0,0,0,.6); }
+.btn.hangup { background: #ef4444; color: #fff; z-index: 2; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .hidden { display: none !important; }
