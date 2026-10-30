@@ -1,4 +1,5 @@
-// Database: SQLite via better-sqlite3. Schema + seed data.
+// Database: SQLite via libsql — Turso cloud when TURSO_DATABASE_URL is set
+// (accounts and data persist across deploys), local file otherwise.
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
@@ -7,10 +8,18 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'luminous.db');
 
-const Database = require('better-sqlite3');
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const Database = require('libsql');
+const TURSO_URL = process.env.TURSO_DATABASE_URL || '';
+let db;
+if (TURSO_URL) {
+  db = new Database(TURSO_URL, { authToken: process.env.TURSO_AUTH_TOKEN || '' });
+  console.log('🗄️ Luminous DB: Turso cloud (persistent)');
+} else {
+  db = new Database(DB_PATH);
+  try { db.pragma('journal_mode = WAL'); } catch (e) {}
+  console.log('🗄️ Luminous DB: local file (ephemeral)');
+}
+try { db.pragma('foreign_keys = ON'); } catch (e) { /* best-effort on remote */ }
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -160,11 +169,56 @@ CREATE TABLE IF NOT EXISTS payouts (
   status TEXT NOT NULL DEFAULT 'pending',       -- pending | paid | rejected
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS password_resets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',       -- pending | used
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS friendships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  requester_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  addressee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',       -- pending | accepted
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  accepted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS dm_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  read_at TEXT
+);
+CREATE TABLE IF NOT EXISTS calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  caller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  callee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'audio',           -- audio | video
+  status TEXT NOT NULL DEFAULT 'ringing',       -- ringing | ongoing | ended | declined | missed
+  offer TEXT,
+  answer TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ended_at TEXT
+);
+CREATE TABLE IF NOT EXISTS call_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+  from_user_id INTEGER NOT NULL,
+  candidate TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stories_expires ON stories(expires_at);
 CREATE INDEX IF NOT EXISTS idx_lums_created ON lums(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_friend_pair ON friendships(requester_id, addressee_id);
+CREATE INDEX IF NOT EXISTS idx_dm_pair ON dm_messages(sender_id, recipient_id);
+CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id, status);
 `;
 db.exec(SCHEMA);
 
