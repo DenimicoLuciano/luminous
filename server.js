@@ -161,7 +161,7 @@ app.get('/api/config', (req, res) => {
       credential: process.env.TURN_PASSWORD,
     });
   }
-  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous', iceServers, turnConfigured: iceServers.length > 1, adsterraKey: process.env.ADSTERRA_KEY || null });
+  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous', iceServers, turnConfigured: iceServers.length > 1, adsterraKey: process.env.ADSTERRA_KEY || null, adsterraSrc: process.env.ADSTERRA_KEY ? (process.env.ADSTERRA_SRC || ('https://bicea.org/22/' + process.env.ADSTERRA_KEY)) : null });
 });
 
 app.post('/api/auth/register', (req, res) => {
