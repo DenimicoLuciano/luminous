@@ -31,8 +31,9 @@ function badgesHtml(u) {
   return h;
 }
 const linkify = (s) => s.replace(/(https?:\/\/[^\s<]+)/g, (u) => '<a href="' + u + '" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:underline">' + u + '</a>');
-let ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-fetch('/api/config').then(r => r.json()).then(c => { if (c && Array.isArray(c.iceServers) && c.iceServers.length) ICE_SERVERS = c.iceServers; }).catch(() => {});
+let ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }];
+let ADSTERRA_KEY = null;
+const CONFIG_READY = fetch('/api/config').then(r => r.json()).then(c => { if (c && Array.isArray(c.iceServers) && c.iceServers.length) ICE_SERVERS = c.iceServers; if (c && c.adsterraKey) ADSTERRA_KEY = c.adsterraKey; }).catch(() => {});
 function postCard(p) {
   const ad = p.is_ad || p._adSlot;
   return `<div class="card${ad ? ' ad-card' : ''}">
@@ -46,6 +47,26 @@ function postCard(p) {
     ${p.content ? `<div class="post-content">${linkify(esc(p.content))}</div>` : ''}
     ${p.image_url ? `<img class="post-img" src="${esc(p.image_url)}" loading="lazy" alt="post image">` : ''}
   </div>`;
+}
+function netAdCard() {
+  return `<div class="card ad-card">
+    <div class="post-head"><div class="post-meta grow">
+      <div class="name">Luminous <span class="badge ad">Sponsored</span></div>
+      <div class="post-time">Ad · paid network</div>
+    </div></div>
+    <div class="net-ad-slot" data-netad style="display:flex;justify-content:center;padding:6px 0"></div>
+  </div>`;
+}
+function mountNetAds(root) {
+  if (!ADSTERRA_KEY) return;
+  root.querySelectorAll('[data-netad]').forEach(slot => {
+    if (slot.dataset.done) return; slot.dataset.done = '1';
+    window.atOptions = { key: ADSTERRA_KEY, format: 'iframe', height: 250, width: 300, params: {} };
+    const sc = document.createElement('script');
+    sc.async = true;
+    sc.src = 'https://www.highperformanceformat.com/' + ADSTERRA_KEY + '/invoke.js';
+    slot.appendChild(sc);
+  });
 }
 const aiNotice = () => `<div class="notice">🤖 <b>AI is not configured on this server yet.</b><br>
   <span class="muted">The server owner needs to set an <code>OPENAI_API_KEY</code> environment variable and redeploy. Everything else in Luminous works without it.</span></div>`;
@@ -243,8 +264,12 @@ const Views = {
     el.innerHTML = `<div class="card center"><div class="muted">Loading your feed…</div></div>`;
     try {
       const { posts } = await API.get('/feed?limit=30');
+      await CONFIG_READY;
       if (!posts.length) { el.innerHTML = `<div class="card center">No posts yet — be the first! <div class="mt"><a class="btn" href="#/create">Create a post</a></div></div>`; return; }
-      el.innerHTML = posts.map(postCard).join('');
+      const items = []; let seenReg = 0;
+      for (const p of posts) { items.push(p); if (!p.is_ad) { seenReg++; if (ADSTERRA_KEY && seenReg % 6 === 0) items.push({ _adSlot: 'network' }); } }
+      el.innerHTML = items.map(p => p._adSlot === 'network' ? netAdCard() : postCard(p)).join('');
+      mountNetAds(el);
       // count views (fire-and-forget); AI views never count toward earnings (server-side)
       posts.forEach(p => { if (!p.is_ad) API.post(`/posts/${p.id}/view`).catch(() => {}); });
     } catch (e) { el.innerHTML = `<div class="card center">Couldn't load the feed. Try again.</div>`; }
@@ -427,6 +452,7 @@ const Views = {
     const peers = new Map();      // stage mesh: uid -> {pc, stream, cand:[], remoteSet}
     const viewerPcs = new Map();  // host -> viewer pcs
     let recvPc = null, recvCand = [], recvRemoteSet = false, trackOrder = null;
+    let hostCandPre = []; const relinkCount = new Map();
     const recvStreams = new Map();
     const timers = [];
     const every = (fn, ms) => { const t = setInterval(fn, ms); timers.push(t); };
@@ -476,7 +502,16 @@ const Views = {
       users.forEach(u => {
         const v = document.getElementById('lv-vid-' + u.user_id);
         const s = streamFor(u.user_id);
-        if (v && s && v.srcObject !== s) v.srcObject = s;
+        if (v && s && v.srcObject !== s) {
+          v.srcObject = s;
+          const mine = App.user && u.user_id === App.user.id;
+          if (!mine) {
+            v.title = 'Tap video for sound on/off';
+            v.onclick = () => { v.muted = !v.muted; toast(v.muted ? 'Sound off' : 'Sound on'); };
+          }
+          const pr = v.play();
+          if (pr && pr.catch) pr.catch(() => { if (!mine && !v.muted) { v.muted = true; v.play().catch(() => {}); } });
+        }
       });
     }
 
@@ -488,7 +523,14 @@ const Views = {
         renderStage();
       };
       pc.onicecandidate = (ev) => { if (ev.candidate) sigSend(uid, 'candidate', ev.candidate.toJSON()); };
-      pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') { /* poll will reconcile */ } };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+          const n = (relinkCount.get(uid) || 0) + 1; relinkCount.set(uid, n);
+          closePeer(uid);
+          if (n <= 4) sigSend(uid, 'relink', {});
+          renderSig = ''; renderStage();
+        }
+      };
     }
     function makePeer(uid) {
       let p = peers.get(uid);
@@ -515,14 +557,22 @@ const Views = {
       const p = peers.get(uid);
       if (p) { try { p.pc.close(); } catch (e) {} peers.delete(uid); }
       const v = viewerPcs.get(uid);
-      if (v) { try { v.close(); } catch (e) {} viewerPcs.delete(uid); }
+      if (v) { try { v.pc.close(); } catch (e) {} viewerPcs.delete(uid); }
     }
 
     /* ---------------- WebRTC: host -> viewer forwarding ---------------- */
     function buildViewerLink(vuid) {
       closePeer(vuid);
       const pc = new RTCPeerConnection(ICE);
-      viewerPcs.set(vuid, pc);
+      const link = { pc, cand: [], remoteSet: false };
+      viewerPcs.set(vuid, link);
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+          const n = (relinkCount.get(vuid) || 0) + 1; relinkCount.set(vuid, n);
+          closePeer(vuid);
+          if (n <= 4) sigSend(vuid, 'relink', {});
+        }
+      };
       const trackOwner = new Map();
       const addSrc = (s, owner) => { if (s) s.getTracks().forEach(t => { pc.addTrack(t, s); trackOwner.set(t.id, owner); }); };
       addSrc(localStream, App.user.id);
@@ -535,7 +585,11 @@ const Views = {
     function syncViewerLinks() {
       if (!isHost || !onStage) return;
       const viewers = participants.filter(p => p.role === 'viewer' && p.status === 'joined');
-      viewers.forEach(v => { if (!viewerPcs.has(v.user_id)) buildViewerLink(v.user_id); });
+      viewers.forEach(v => {
+        const link = viewerPcs.get(v.user_id);
+        if (!link) buildViewerLink(v.user_id);
+        else if (['failed', 'closed'].includes(link.pc.connectionState)) { closePeer(v.user_id); buildViewerLink(v.user_id); }
+      });
       [...viewerPcs.keys()].forEach(uid => { if (!partOf(uid) || partOf(uid).role !== 'viewer') closePeer(uid); });
     }
     function rebuildViewerLinks() {
@@ -568,13 +622,23 @@ const Views = {
       try { payload = JSON.parse(s.payload || '{}'); } catch (e) { return; }
       const from = s.from_id;
       try {
+        if (s.kind === 'relink') {
+          if (isHost && onStage) { const fp = partOf(from); if (fp && fp.role === 'viewer' && fp.status === 'joined') { closePeer(from); buildViewerLink(from); } }
+          if (!onStage && from === stream.user_id && recvPc) { try { recvPc.close(); } catch (e) {} recvPc = null; recvRemoteSet = false; recvCand = []; recvStreams.delete(stream.user_id); renderSig = ''; renderStage(); }
+          if (onStage && peers.has(from)) { closePeer(from); if (App.user && App.user.id < from) offerTo(from); }
+          return;
+        }
         if (s.kind === 'track-map') { trackOrder = payload.order || null; setTimeout(mapRecvTracks, 350); return; }
         if (s.kind === 'bye') { closePeer(from); if (recvPc && from === stream.user_id) { /* host link may rebuild */ } renderStage(); return; }
         if (s.kind === 'candidate') {
           const cand = new RTCIceCandidate(payload);
-          if (recvPc && from === stream.user_id && !peers.has(from)) { if (recvRemoteSet) { try { await recvPc.addIceCandidate(cand); } catch (e) {} } else recvCand.push(cand); return; }
+          if (from === stream.user_id && !peers.has(from)) {
+            if (recvPc) { if (recvRemoteSet) { try { await recvPc.addIceCandidate(cand); } catch (e) {} } else recvCand.push(cand); }
+            else if (!onStage) hostCandPre.push(cand);
+            return;
+          }
           const vp = viewerPcs.get(from);
-          if (vp) { try { await vp.addIceCandidate(cand); } catch (e) {} return; }
+          if (vp) { if (vp.remoteSet) { try { await vp.pc.addIceCandidate(cand); } catch (e) {} } else vp.cand.push(cand); return; }
           const p = peers.get(from);
           if (p) { if (p.remoteSet) { try { await p.pc.addIceCandidate(cand); } catch (e) {} } else p.cand.push(cand); }
           return;
@@ -594,20 +658,27 @@ const Views = {
             recvPc = new RTCPeerConnection(ICE);
             recvRemoteSet = false; recvCand = [];
             recvPc.ontrack = () => setTimeout(mapRecvTracks, 350);
+            recvPc.onconnectionstatechange = () => {
+              if (recvPc && recvPc.connectionState === 'failed') {
+                try { recvPc.close(); } catch (e) {} recvPc = null; recvRemoteSet = false; recvCand = [];
+                sigSend(stream.user_id, 'relink', {});
+              }
+            };
             recvPc.onicecandidate = (ev) => { if (ev.candidate) sigSend(from, 'candidate', ev.candidate.toJSON()); };
             await recvPc.setRemoteDescription(new RTCSessionDescription(payload));
             recvRemoteSet = true;
             for (const c of recvCand.splice(0)) { try { await recvPc.addIceCandidate(c); } catch (e) {} }
+            for (const c of hostCandPre.splice(0)) { try { await recvPc.addIceCandidate(c); } catch (e) {} }
             const ans = await recvPc.createAnswer();
             await recvPc.setLocalDescription(ans);
             sigSend(from, 'answer', recvPc.localDescription.toJSON());
-            setTimeout(mapRecvTracks, 600);
+            setTimeout(mapRecvTracks, 600); setTimeout(mapRecvTracks, 1600);
           }
           return;
         }
         if (s.kind === 'answer') {
           const vp = viewerPcs.get(from);
-          if (vp) { try { await vp.setRemoteDescription(new RTCSessionDescription(payload)); } catch (e) {} return; }
+          if (vp) { try { await vp.pc.setRemoteDescription(new RTCSessionDescription(payload)); vp.remoteSet = true; for (const c of vp.cand.splice(0)) { try { await vp.pc.addIceCandidate(c); } catch (e) {} } } catch (e) {} return; }
           const p = peers.get(from);
           if (p) { await p.pc.setRemoteDescription(new RTCSessionDescription(payload)); p.remoteSet = true; await flushCand(p, p.pc); }
           return;
@@ -780,6 +851,10 @@ const Views = {
         if (isHost && onStage) rebuildViewerLinks();
       }
       if (isHost) syncViewerLinks();
+      if (!isHost && !onStage && App.user && !recvPc && !recvStreams.get(stream.user_id)) {
+        const nowTs = Date.now();
+        if (!liveRoom._needLinkAt || nowTs - liveRoom._needLinkAt > 15000) { liveRoom._needLinkAt = nowTs; sigSend(stream.user_id, 'relink', {}); }
+      }
       // drop peers for people who left the stage
       if (onStage) [...peers.keys()].forEach(uid => { const p = partOf(uid); if (!p || p.status !== 'joined') closePeer(uid); });
     }
@@ -1018,7 +1093,7 @@ const Views = {
 
   /* ---------------- WALLET ---------------- */
   async wallet(el) {
-    const { wallet, payouts, canEarn, payoutThresholdCents, earnPer1kViews } = await API.get('/wallet');
+    const { wallet, payouts, canEarn, payoutThresholdCents, earnPer1kViews, payoutMethod } = await API.get('/wallet');
     const earnDollars = (wallet.earnings_cents / 100).toFixed(2);
     el.innerHTML = `
       <div class="card"><h3 style="margin:0 0 10px">👛 Wallet</h3>
@@ -1026,6 +1101,9 @@ const Views = {
           <div class="stat card"><div class="num">🪙 ${wallet.coins}</div><div class="muted">coins</div></div>
           <div class="stat card"><div class="num">$${earnDollars}</div><div class="muted">ad earnings</div></div>
         </div></div>
+      <div class="card"><h4 style="margin:0 0 8px">💳 Cashout method</h4>
+        <div id="pmBox"></div>
+      </div>
       <div class="card"><h4 style="margin:0 0 8px">💰 Creator earnings</h4>
         ${canEarn ? `
           <div class="muted">You earn <b>55% of ad revenue</b> — <b>$${earnPer1kViews.toFixed(2)} per 1,000 real views</b> on your posts. (AI demo-account views never count.)</div>
@@ -1036,8 +1114,51 @@ const Views = {
             <div class="mt"><a class="btn small" href="#/settings">Upgrade in Settings</a></div></div>`}
       </div>
       <div class="card"><h4 style="margin:0 0 8px">Payout history</h4>
-        ${payouts.length ? payouts.map(p => `<div class="row"><div class="grow">$${(p.amount_cents / 100).toFixed(2)} · ${timeAgo(p.created_at)}</div><span class="badge">${esc(p.status)}</span></div>`).join('')
+        ${payouts.length ? payouts.map(p => `<div class="row"><div class="grow">$${(p.amount_cents / 100).toFixed(2)} · ${timeAgo(p.created_at)}${p.destination ? ` · to ${esc(p.destination)}` : ''}</div><span class="badge">${esc(p.status)}</span></div>`).join('')
           : `<div class="muted">No payouts yet.</div>`}</div>`;
+    // ---- cashout method wiring ----
+    const pmBox = document.getElementById('pmBox');
+    const pmLabel = (pm) => pm.method === 'paypal' ? `PayPal — ${esc(pm.paypal_email)}` : `Visa debit •••• ${esc(pm.card_last4 || '')} (${esc(pm.card_name || '')})`;
+    const pmForm = () => {
+      pmBox.innerHTML = `<div class="muted">Where should your cashouts go? You can save this <b>now</b> — you don't need to reach the $10 minimum first.</div>
+        <div class="mt"><select id="pmMethod" style="width:100%">
+          <option value="paypal">PayPal</option>
+          <option value="visa_debit">Visa debit card</option>
+        </select></div>
+        <div id="pmFields" class="mt"></div>
+        <div class="row mt"><button class="btn small" id="pmSave">Save cashout method</button>
+        ${payoutMethod ? '<button class="btn small ghost" id="pmCancel">Cancel</button>' : ''}</div>`;
+      const fields = document.getElementById('pmFields');
+      const draw = () => {
+        const m = document.getElementById('pmMethod').value;
+        fields.innerHTML = m === 'paypal'
+          ? `<input id="pmEmail" type="email" placeholder="Your PayPal email" style="width:100%">`
+          : `<input id="pmName" placeholder="Name on card" style="width:100%">
+             <input id="pmLast4" inputmode="numeric" maxlength="4" placeholder="Last 4 digits ONLY" class="mt" style="width:100%">
+             <div class="muted mt">For safety we only ever store the <b>last 4 digits</b> — never enter your full card number.</div>`;
+      };
+      document.getElementById('pmMethod').onchange = draw; draw();
+      const cancel = document.getElementById('pmCancel'); if (cancel) cancel.onclick = pmShow;
+      document.getElementById('pmSave').onclick = async () => {
+        const m = document.getElementById('pmMethod').value;
+        const body = { method: m };
+        if (m === 'paypal') body.paypal_email = document.getElementById('pmEmail').value;
+        else { body.card_name = document.getElementById('pmName').value; body.card_last4 = document.getElementById('pmLast4').value; }
+        try { await API.post('/wallet/payout-method', body); toast('Cashout method saved'); Views.wallet(el); }
+        catch (e) { toast(e.data?.error || 'Could not save'); }
+      };
+    };
+    const pmShow = () => {
+      if (payoutMethod) {
+        pmBox.innerHTML = `<div class="row"><span class="grow">${pmLabel(payoutMethod)}</span>
+          <button class="btn small ghost" id="pmChange">Change</button>
+          <button class="btn small ghost" id="pmRemove">Remove</button></div>
+          <div class="muted mt">This is where payouts will be sent when you cash out.</div>`;
+        document.getElementById('pmChange').onclick = pmForm;
+        document.getElementById('pmRemove').onclick = async () => { try { await API.del('/wallet/payout-method'); toast('Cashout method removed'); Views.wallet(el); } catch (e) { toast('Could not remove'); } };
+      } else pmForm();
+    };
+    pmShow();
     const btn = document.getElementById('payoutBtn');
     if (btn) btn.onclick = async () => {
       try { const r = await API.post('/wallet/payout'); toast(`Payout requested: $${(r.amount_cents / 100).toFixed(2)} 🎉`); Views.wallet(el); App.refreshAuth(); }
