@@ -978,11 +978,11 @@ const Views = {
       box.innerHTML += `<div class="msg assistant" id="typing"><i>typing…</i></div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        const r = await API.post(`/mentors/${key}/chat`, { message: text });
+        const r = await API.post(`/mentors/${key}/chat`, { message: text }, 100000);
         document.getElementById('typing')?.remove();
         if (r.aiConfigured) box.innerHTML += `<div class="msg assistant">${esc(r.reply)}</div>`;
         else box.innerHTML += `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
-      } catch (e) { document.getElementById('typing')?.remove(); box.innerHTML += `<div class="msg assistant"><i>Something went wrong.</i></div>`; }
+      } catch (e) { document.getElementById('typing')?.remove(); box.innerHTML += e && e.name === 'AbortError' ? `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>` : `<div class="msg assistant"><i>Something went wrong.</i></div>`; }
       box.scrollTop = box.scrollHeight;
     };
     document.getElementById('chatSend').onclick = send;
@@ -1082,10 +1082,10 @@ const Views = {
       box.innerHTML += `<div class="msg user">${esc(text)}</div><div class="msg assistant" id="typing"><i>typing…</i></div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        const r = await API.post(`/companions/${id}/chat`, { message: text });
+        const r = await API.post(`/companions/${id}/chat`, { message: text }, 100000);
         document.getElementById('typing')?.remove();
         box.innerHTML += r.aiConfigured ? `<div class="msg assistant">${esc(r.reply)}</div>` : `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
-      } catch (e) { document.getElementById('typing')?.remove(); }
+      } catch (e) { document.getElementById('typing')?.remove(); if (e && e.name === 'AbortError') box.innerHTML += `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>`; }
       box.scrollTop = box.scrollHeight;
     };
     document.getElementById('chatSend').onclick = send;
