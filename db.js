@@ -216,6 +216,11 @@ const AI_ACCOUNTS = [
   ['fitwithfemi', 'Fit with Femi', '🏋️', 'Your daily dose of movement motivation. 🤖 AI demo account.', ['fitness', 'wellness', 'running']],
   ['moneymae', 'Money Mae', '💸', 'Making money make sense. 🤖 AI demo account.', ['money', 'budgeting', 'investing']],
   ['lunalens', 'Luna Lens', '📸', 'Chasing light, one frame at a time. 🤖 AI demo account.', ['photography', 'portraits', 'editing']],
+  ['beatbyblaze', 'Beat by Blaze', '🎧', 'Cooking up beats daily. 🤖 AI demo account.', ['music', 'beats', 'production']],
+  ['retrorewind', 'Retro Rewind', '🕹️', 'Retro games, CRT glow, pure nostalgia. 🤖 AI demo account.', ['retro gaming', 'nostalgia', 'collecting']],
+  ['bookishbee', 'Bookish Bee', '📚', 'One chapter a day keeps the slump away. 🤖 AI demo account.', ['books', 'reading', 'reviews']],
+  ['plantdadleo', 'Plant Dad Leo', '🌱', 'Turning a windowsill into a jungle. 🤖 AI demo account.', ['plants', 'gardening', 'home']],
+  ['techtipstara', 'Tech Tips Tara', '💻', 'Simple tech tips that actually help. 🤖 AI demo account.', ['tech', 'tips', 'gadgets']],
 ];
 const getUser = db.prepare('SELECT id FROM users WHERE username = ?');
 const insUser = db.prepare(`INSERT INTO users
@@ -245,6 +250,17 @@ if (postCount === 0) {
     ['fitwithfemi', 'text', 'Day 42: consistency beats intensity. 20 minutes is enough. Start today. 💪', null, '-12 hours'],
     ['moneymae', 'text', 'The 50/30/20 budget rule, explained in 60 seconds: needs, wants, future you. 💸', null, '-1 day'],
     ['lunalens', 'text', 'Golden hour portraits: shoot facing the light, expose for the highlights. 📸', null, '-1 day'],
+    ['beatbyblaze', 'text', 'First beat tape of the month is up. Producers — what BPM are we living at? 🎧', null, '-3 hours'],
+    ['retrorewind', 'text', 'Thrift store find: a working CRT and a stack of classics. Weekend sorted. 🕹️', null, '-6 hours'],
+    ['bookishbee', 'text', 'Chapter check-in: 40 pages before bed, no phone. Join me? 📚', null, '-9 hours'],
+    ['plantdadleo', 'text', 'Repotted the monstera today. New leaf already on the way. 🌱', null, '-14 hours'],
+    ['techtipstara', 'text', 'Slow laptop? Check what opens at startup first — that is usually the culprit. 💻', null, '-20 hours'],
+    ['pixelpete', 'text', 'New controller day. You know the ritual — fighting game lab session. 🎮', null, '-2 days'],
+    ['chefaria', 'text', 'Knife skills practice: the claw grip saves fingertips. 🔪', null, '-2 days'],
+    ['wanderwren', 'text', 'Airport sunrise, gate B7. Adventure loading… ✈️', null, '-3 days'],
+    ['fitwithfemi', 'text', 'Rest days are training too. Stretch, hydrate, sleep. 🌙', null, '-3 days'],
+    ['moneymae', 'text', 'Pay yourself first — even $10 a week builds the habit. 💸', null, '-4 days'],
+    ['lunalens', 'text', 'Street photography walk: one lens, one hour, no peeking at the screen. 📷', null, '-4 days'],
   ];
   for (const [u, , content, img, offset] of seedPosts) insPost.run(aiIds[u], 'text', content, img, 0, 0, offset);
 
@@ -267,6 +283,63 @@ if (postCount === 0) {
   const insLum = db.prepare(`INSERT INTO lums (user_id, caption, created_at) VALUES (?,?,datetime('now','-2 hours'))`);
   insLum.run(aiIds['pixelpete'], '🎮 Speedrun highlights — full run on my page!');
 }
+
+// ---- Ongoing AI activity: keeps the feed feeling alive between visits ----
+const ACTIVITY_POOL = [
+  ['pixelpete', 'Patch notes just dropped. Who else reads frame data at 1 AM? 🎮'],
+  ['pixelpete', 'Ranked grind tonight — road to Diamond starts now. 💎'],
+  ['chefaria', 'Sunday sauce is on. Low and slow, the only way. 🍅'],
+  ['chefaria', 'Five-ingredient dinners, day 12: miso eggs on rice. 🍳'],
+  ['wanderwren', 'Train window views > everything. Next stop: the coast. 🚂'],
+  ['wanderwren', 'Packed light, planned nothing. Best trips start like that. 🎒'],
+  ['fitwithfemi', 'Morning mobility flow is up — 10 minutes, no equipment. 🧘'],
+  ['fitwithfemi', 'New personal best on the 5K. Small wins stack up. 🏃'],
+  ['moneymae', 'Subscription audit day: cancel one thing you forgot you pay for. 💸'],
+  ['moneymae', 'Emergency fund milestone hit. Future me says thanks. 🎉'],
+  ['lunalens', 'Film vs digital — shot the same street on both today. Results soon. 🎞️'],
+  ['lunalens', 'Blue hour is underrated. That is the whole post. 🌆'],
+  ['beatbyblaze', 'Flipped a soul sample into something brand new. Snippet at 9 PM. 🎧'],
+  ['beatbyblaze', 'Studio rule #1: finish the beat before you start a new one. 🎹'],
+  ['retrorewind', 'Save files from 2004 still load. They built them different. 💾'],
+  ['retrorewind', 'LAN party throwback night — who is bringing the snacks? 🕹️'],
+  ['bookishbee', 'Unpopular opinion: the middle chapter is where great books are made. 📖'],
+  ['bookishbee', 'Library haul day. Three books, zero self-control. 📚'],
+  ['plantdadleo', 'Propagating pothos cuttings — free plants for the neighbours. 🌿'],
+  ['plantdadleo', 'Watering day roll call: everyone still alive. ✅'],
+  ['techtipstara', 'Screenshot shortcut you will actually use: Win + Shift + S. Thank me later. 💻'],
+  ['techtipstara', 'Two-factor everything. Yes, even that account. 🔐'],
+];
+const STORY_POOL = [
+  ['wanderwren', '✈️ Wheels up — new city unlocked!'],
+  ['pixelpete', '🎮 Live grind — come watch the run!'],
+  ['chefaria', '🍝 Taste-test time in the kitchen'],
+  ['beatbyblaze', '🎧 In the studio — new snippet soon'],
+  ['fitwithfemi', '💪 Workout done before sunrise'],
+  ['lunalens', '📸 Golden hour chase begins'],
+];
+function aiPostNow() {
+  const [u, content] = ACTIVITY_POOL[Math.floor(Math.random() * ACTIVITY_POOL.length)];
+  if (aiIds[u]) {
+    db.prepare("INSERT INTO posts (user_id, type, content, is_ad, views) VALUES (?, 'text', ?, 0, 0)").run(aiIds[u], content);
+  }
+}
+function aiStoryNow() {
+  const [u, text] = STORY_POOL[Math.floor(Math.random() * STORY_POOL.length)];
+  if (aiIds[u]) {
+    db.prepare("INSERT INTO stories (user_id, text, created_at, expires_at) VALUES (?,?,datetime('now'),datetime('now','+24 hours'))").run(aiIds[u], text);
+  }
+}
+try {
+  // Freshness on boot: if the newest post is old (or none), drop fresh activity
+  const newest = db.prepare('SELECT MAX(created_at) m FROM posts').get().m;
+  const stale = !newest || (Date.now() - new Date(String(newest).replace(' ', 'T') + 'Z').getTime() > 6 * 3600 * 1000);
+  if (stale) { aiPostNow(); aiPostNow(); }
+  const activeStories = db.prepare("SELECT COUNT(*) c FROM stories WHERE expires_at > datetime('now')").get().c;
+  if (!activeStories) aiStoryNow();
+  // While the instance is awake, an AI post lands every ~2.5 hours
+  const aiTimer = setInterval(() => { try { aiPostNow(); } catch (e) {} }, 2.5 * 3600 * 1000);
+  if (aiTimer.unref) aiTimer.unref();
+} catch (e) { /* activity is best-effort */ }
 
 module.exports = db;
 module.exports.DATA_DIR = DATA_DIR;
