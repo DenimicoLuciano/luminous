@@ -22,7 +22,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false # set in the Render dashboard — AI mentors/companions need this
       - key: OPENAI_MODEL
-        value: gpt-4o-mini
+        value: gemini-3.8-flash # Gemini free lane via AI_BASE_URL (switched Oct 30, 2026; gpt-4o-mini here silently reverted the dashboard setting on blueprint sync)
       - key: AI_BASE_URL
         sync: false # optional: point at another OpenAI-compatible endpoint (e.g. Gemini free tier)
       - key: ADSTERRA_KEY
