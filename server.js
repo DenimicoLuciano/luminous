@@ -153,7 +153,7 @@ function optionalAuth(req, res, next) {
 app.get('/api/config', (req, res) => {
   // WebRTC ICE: STUN always; a TURN relay joins when its credentials are set in the environment.
   // TURN is what lets live video punch through strict home/mobile networks.
-  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+  const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }];
   if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_PASSWORD) {
     iceServers.push({
       urls: process.env.TURN_URL.split(',').map(s => s.trim()).filter(Boolean),
@@ -161,7 +161,7 @@ app.get('/api/config', (req, res) => {
       credential: process.env.TURN_PASSWORD,
     });
   }
-  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous', iceServers, turnConfigured: iceServers.length > 1 });
+  res.json({ aiConfigured: AI_CONFIGURED(), appName: 'Luminous', iceServers, turnConfigured: iceServers.length > 1, adsterraKey: process.env.ADSTERRA_KEY || null });
 });
 
 app.post('/api/auth/register', (req, res) => {
@@ -900,7 +900,37 @@ app.get('/api/wallet', authRequired, (req, res) => {
   const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
   const payouts = db.prepare('SELECT * FROM payouts WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(req.user.id);
   const canEarn = req.user.verified && ['business', 'creator'].includes(req.user.account_type);
-  res.json({ wallet, payouts, canEarn, payoutThresholdCents: 1000, earnPer1kViews: 3.30 });
+  const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id) || null;
+  res.json({ wallet, payouts, canEarn, payoutThresholdCents: 1000, earnPer1kViews: 3.30, payoutMethod: pm });
+});
+
+app.post('/api/wallet/payout-method', authRequired, (req, res) => {
+  const b = req.body || {};
+  const method = b.method;
+  if (!['paypal', 'visa_debit'].includes(method)) return res.status(400).json({ error: 'Choose PayPal or Visa debit' });
+  if (method === 'paypal') {
+    const email = String(b.paypal_email || '').trim().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid PayPal email' });
+    db.prepare(`INSERT INTO payout_methods (user_id, method, paypal_email, card_last4, card_name, updated_at)
+      VALUES (?,?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET method=excluded.method, paypal_email=excluded.paypal_email, card_last4=NULL, card_name=NULL, updated_at=datetime('now')`)
+      .run(req.user.id, method, email, null, null);
+  } else {
+    const name = String(b.card_name || '').trim().slice(0, 60);
+    const digits = String(b.card_last4 || '').replace(/\D/g, '');
+    if (digits.length > 4) return res.status(400).json({ error: 'For safety, enter ONLY the last 4 digits — never the full card number' });
+    if (digits.length !== 4) return res.status(400).json({ error: 'Enter the last 4 digits of the card' });
+    if (!name) return res.status(400).json({ error: 'Enter the name on the card' });
+    db.prepare(`INSERT INTO payout_methods (user_id, method, paypal_email, card_last4, card_name, updated_at)
+      VALUES (?,?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET method=excluded.method, paypal_email=NULL, card_last4=excluded.card_last4, card_name=excluded.card_name, updated_at=datetime('now')`)
+      .run(req.user.id, method, null, digits, name);
+  }
+  const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id);
+  res.json({ ok: true, payoutMethod: pm });
+});
+
+app.delete('/api/wallet/payout-method', authRequired, (req, res) => {
+  db.prepare('DELETE FROM payout_methods WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true });
 });
 
 app.post('/api/wallet/payout', authRequired, (req, res) => {
@@ -909,11 +939,14 @@ app.post('/api/wallet/payout', authRequired, (req, res) => {
   ensureWallet(req.user.id);
   const w = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
   if (w.earnings_cents < 1000) return res.status(400).json({ error: 'Minimum payout is $10.00' });
+  const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id);
+  if (!pm) return res.status(400).json({ error: 'Add a cashout method first (PayPal or Visa debit) — you can save one in your Wallet anytime' });
   const amount = Math.floor(w.earnings_cents);
+  const destination = pm.method === 'paypal' ? pm.paypal_email : ('Visa debit •••• ' + pm.card_last4);
   db.prepare('UPDATE wallets SET earnings_cents = earnings_cents - ? WHERE user_id = ?').run(amount, req.user.id);
-  const r = db.prepare('INSERT INTO payouts (user_id, amount_cents, status) VALUES (?,?,?)')
-    .run(req.user.id, amount, 'pending');
-  res.json({ ok: true, id: r.lastInsertRowid, amount_cents: amount });
+  const r = db.prepare('INSERT INTO payouts (user_id, amount_cents, status, method, destination) VALUES (?,?,?,?,?)')
+    .run(req.user.id, amount, 'pending', pm.method, destination);
+  res.json({ ok: true, id: r.lastInsertRowid, amount_cents: amount, method: pm.method, destination });
 });
 
 // ---------- admin (developer only) ----------
