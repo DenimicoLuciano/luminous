@@ -177,6 +177,14 @@ CREATE TABLE IF NOT EXISTS password_resets (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL DEFAULT '',
+  image_url TEXT,
+  publish_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS friendships (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   requester_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
