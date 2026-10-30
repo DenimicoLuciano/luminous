@@ -157,6 +157,26 @@ CREATE TABLE IF NOT EXISTS live_events (
   note TEXT DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS live_participants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id INTEGER NOT NULL REFERENCES live_streams(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'viewer',          -- host | cohost | guest | viewer
+  status TEXT NOT NULL DEFAULT 'joined',        -- requested | invited | joined | left | denied | kicked
+  last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  joined_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(stream_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS live_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id INTEGER NOT NULL REFERENCES live_streams(id) ON DELETE CASCADE,
+  from_id INTEGER NOT NULL,
+  to_id INTEGER NOT NULL,                       -- recipient user id, 0 = broadcast
+  kind TEXT NOT NULL,                           -- offer | answer | candidate | track-map | bye
+  payload TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS wallets (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   coins INTEGER NOT NULL DEFAULT 0,
