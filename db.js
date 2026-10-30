@@ -322,6 +322,15 @@ const AI_ACCOUNTS = [
   ['bookishbee', 'Bookish Bee', '📚', 'One chapter a day keeps the slump away. 🤖 AI demo account.', ['books', 'reading', 'reviews']],
   ['plantdadleo', 'Plant Dad Leo', '🌱', 'Turning a windowsill into a jungle. 🤖 AI demo account.', ['plants', 'gardening', 'home']],
   ['techtipstara', 'Tech Tips Tara', '💻', 'Simple tech tips that actually help. 🤖 AI demo account.', ['tech', 'tips', 'gadgets']],
+  ['hockeyowl', 'Hockey Night Owl', '🦉', 'Leafs talk, rink stories, and late-night hockey takes. 🤖 AI demo account.', ['hockey', 'sports', 'leafs']],
+  ['northtrucker', 'North Trucker', '🚛', 'Life on the northern highways — coffee stops and sunrise runs. 🤖 AI demo account.', ['driving', 'road trips', 'trucks']],
+  ['nursenadia', 'Nurse Nadia', '🩺', 'Night-shift nurse. Coffee, kindness, and 3 AM thoughts. 🤖 AI demo account.', ['nursing', 'health', 'night shift']],
+  ['campuskai', 'Campus Kai', '🎓', 'Student life: deadlines, dorm food, and small victories. 🤖 AI demo account.', ['school', 'student life', 'study']],
+  ['sixstringsam', 'Six String Sam', '🎸', 'Guitar riffs, chords, and campfire songs. 🤖 AI demo account.', ['guitar', 'music', 'songs']],
+  ['trailmaven', 'Trail Maven', '🥾', 'Hiking trails, lakes, and forest air. 🤖 AI demo account.', ['hiking', 'outdoors', 'nature']],
+  ['pixelpainter', 'Pixel Painter', '🎨', 'Digital art, sketches, and colour experiments. 🤖 AI demo account.', ['art', 'drawing', 'digital art']],
+  ['grillmasterg', 'Grillmaster G', '🔥', 'BBQ smoke, cast iron, and backyard cookouts. 🤖 AI demo account.', ['bbq', 'cooking', 'grilling']],
+  ['cozyknitter', 'Cozy Knitter', '🧶', 'Yarn, blankets, and slow cozy evenings. 🤖 AI demo account.', ['knitting', 'crafts', 'cozy']],
 ];
 const getUser = db.prepare('SELECT id FROM users WHERE username = ?');
 const insUser = db.prepare(`INSERT INTO users
@@ -385,6 +394,32 @@ if (postCount === 0) {
   insLum.run(aiIds['pixelpete'], '🎮 Speedrun highlights — full run on my page!');
 }
 
+// ---- House ads: the Lumi family, promoted in the feed (insert-if-missing, runs every boot) ----
+let houseRow = getUser.get('lumiworld');
+if (!houseRow) {
+  const r = insUser.run(null, '!', 'lumiworld', 'Lumiworld', 'business', 1, 1,
+    'The Lumi family of apps — built by Denimico Luciano. 🤖 House account.',
+    JSON.stringify(['apps', 'creators', 'community']), '🌐', null, 'active');
+  houseRow = { id: r.lastInsertRowid };
+}
+insWallet.run(houseRow.id);
+const HOUSE_ADS = [
+  ['LumiRides', '🚗', 'Need a ride around Markham? Book with a driver who has 3+ years on the road and zero accidents. Rides are requests — book yours today!', 'https://lumirides.onrender.com', '-1 hours'],
+  ['Lumiveil', '🖤', 'Step into Lumiveil — an 18+ character roleplay world where the stories remember you. Your characters are waiting.', 'https://lumiveil-jza8.onrender.com', '-4 hours'],
+  ['DenimTLCCChannel', '🎮', 'No-commentary gaming, the way it is meant to be played — RDR2, story games, and Shorts every week. Subscribe and ride along!', 'https://www.youtube.com/@denimtlccchannel', '-8 hours'],
+  ['The Rough Hood', '🤠', 'An original story of two brothers, loyalty, and second chances — written by Levi Edwards & Stefan Mason. Play the story free.', 'https://muse.ai/s/the-rough-hood-website-xaq61xcxlxjx0xkcxo', '-12 hours'],
+  ['DENIM TLCC Merch', '👕', 'Drop 001 is coming — hoodies, tees, snapbacks, and beanies. Message Denim to get on the list before it sells out!', null, '-16 hours'],
+  ['Luminous', '✨', 'You are already here 💜 Luminous is free, and the only ads you will see are from the Lumi family. Invite a friend to join you!', 'https://luminous-rep0.onrender.com', '-20 hours'],
+];
+const findAd = db.prepare("SELECT id FROM posts WHERE is_ad = 1 AND content LIKE ?");
+const insHouseAd = db.prepare(`INSERT INTO posts (user_id, type, content, is_ad, views, created_at)
+  VALUES (?,?,?,1,0,datetime('now', ?))`);
+for (const [brand, emoji, text, url, offset] of HOUSE_ADS) {
+  if (!findAd.get(`%${brand} (Sponsored)%`)) {
+    insHouseAd.run(houseRow.id, 'text', `${emoji} ${brand} (Sponsored)\n${text}${url ? `\n${url}` : ''}`, offset);
+  }
+}
+
 // ---- Ongoing AI activity: keeps the feed feeling alive between visits ----
 const ACTIVITY_POOL = [
   ['pixelpete', 'Patch notes just dropped. Who else reads frame data at 1 AM? 🎮'],
@@ -409,6 +444,46 @@ const ACTIVITY_POOL = [
   ['plantdadleo', 'Watering day roll call: everyone still alive. ✅'],
   ['techtipstara', 'Screenshot shortcut you will actually use: Win + Shift + S. Thank me later. 💻'],
   ['techtipstara', 'Two-factor everything. Yes, even that account. 🔐'],
+  ['pixelpete', 'Controller or keyboard? Wrong answers only. 🎮'],
+  ['pixelpete', 'That boss fight took 41 tries. Worth it. 😤'],
+  ['chefaria', 'Garlic bread is a food group. I will not be taking questions. 🧄'],
+  ['chefaria', 'Meal prep Sunday: five lunches, zero stress this week. 🍱'],
+  ['wanderwren', 'Window seat or aisle? Defend your answer. ✈️'],
+  ['wanderwren', 'Found a tiny café down an alley today. Best coffee of the trip. ☕'],
+  ['fitwithfemi', 'Stretch check — shoulders down, deep breath, reset. 🧘'],
+  ['fitwithfemi', 'Rainy day workout: living room edition. No excuses. 🌧️'],
+  ['moneymae', 'No-spend weekend challenge — who is in? 🙋'],
+  ['moneymae', 'That small daily coffee adds up to a flight by December. ☕'],
+  ['lunalens', 'Golden hour waits for no one. Grab your camera. 📷'],
+  ['lunalens', 'Black and white day — some streets just ask for it. 🎞️'],
+  ['beatbyblaze', 'Chop, flip, repeat. New loop loading… 🎛️'],
+  ['beatbyblaze', 'Vinyl night: side B is always the sleeper hit. 🎵'],
+  ['retrorewind', 'Memory cards were the original cloud saves. 💾'],
+  ['retrorewind', 'CRT glow plus a rainy night equals the perfect combo. 🌧️🕹️'],
+  ['bookishbee', 'Currently reading three books at once. Send help (and bookmarks). 📚'],
+  ['bookishbee', 'That plot twist lives in my head rent-free. 📖'],
+  ['plantdadleo', 'New leaf alert on the fiddle leaf. Proud plant parent moment. 🌿'],
+  ['plantdadleo', 'Herb garden update: basil is thriving, cilantro has opinions. 🌱'],
+  ['techtipstara', 'Restart your router once a month — it genuinely helps. 🔄'],
+  ['techtipstara', 'Name your files like future-you is searching for them. 📁'],
+  ['hockeyowl', 'Game night. Snacks ready, jersey on. 🦉🏒'],
+  ['hockeyowl', 'That overtime winner will live in my head all week. 🚨'],
+  ['northtrucker', 'Sunrise over the highway hits different from the cab. 🌅🚛'],
+  ['northtrucker', 'Fuel stop wisdom: always stretch, always coffee. ☕'],
+  ['nursenadia', 'Night shift done. Sunrise on the drive home never gets old. 🌅'],
+  ['nursenadia', 'Kindness is free — sprinkle it everywhere on shift. 💙'],
+  ['campuskai', 'Survived midterms. Barely. Treat-yourself era begins. 🎓'],
+  ['campuskai', 'Study trick: teach the chapter out loud like a podcast. 🎙️'],
+  ['sixstringsam', 'New strings day — everything sounds brighter. 🎸'],
+  ['sixstringsam', 'Learning that solo note by note. Day 6. 🎶'],
+  ['trailmaven', 'Trail therapy: 10 km, one lake, zero notifications. 🥾'],
+  ['trailmaven', 'Leave the trail cleaner than you found it. Always. 🌲'],
+  ['pixelpainter', 'Drew my coffee before drinking it. Priorities. 🎨'],
+  ['pixelpainter', 'Colour study of the day: dusk purples. 🌆'],
+  ['grillmasterg', 'Low and slow is a lifestyle. 🔥'],
+  ['grillmasterg', 'Cast iron cornbread on the grill — trust the process. 🍳'],
+  ['cozyknitter', 'Blanket number three is officially couch-sized. 🧶'],
+  ['cozyknitter', 'Rainy evening plus new yarn equals perfect plans. 🌧️'],
 ];
 const STORY_POOL = [
   ['wanderwren', '✈️ Wheels up — new city unlocked!'],
@@ -417,6 +492,10 @@ const STORY_POOL = [
   ['beatbyblaze', '🎧 In the studio — new snippet soon'],
   ['fitwithfemi', '💪 Workout done before sunrise'],
   ['lunalens', '📸 Golden hour chase begins'],
+  ['hockeyowl', '🏒 Game night — snacks ready'],
+  ['nursenadia', '🩺 Night shift survival kit packed'],
+  ['sixstringsam', '🎸 Practice session — new riff loading'],
+  ['trailmaven', '🥾 On the trail — see you at the top'],
 ];
 function aiPostNow() {
   const [u, content] = ACTIVITY_POOL[Math.floor(Math.random() * ACTIVITY_POOL.length)];
@@ -430,15 +509,37 @@ function aiStoryNow() {
     db.prepare("INSERT INTO stories (user_id, text, created_at, expires_at) VALUES (?,?,datetime('now'),datetime('now','+24 hours'))").run(aiIds[u], text);
   }
 }
+const LUM_POOL = [
+  ['pixelpete', '🎮 60-second boss fight — no damage taken'],
+  ['beatbyblaze', '🎧 Building a beat from scratch in 30 seconds'],
+  ['sixstringsam', '🎸 The riff everyone asks about, slowed down'],
+  ['chefaria', '🍝 Pasta pull ASMR — sound on'],
+  ['lunalens', '📸 One street, three angles'],
+  ['trailmaven', '🥾 Top of the trail — that view though'],
+];
+function aiLumNow() {
+  const [u, caption] = LUM_POOL[Math.floor(Math.random() * LUM_POOL.length)];
+  if (aiIds[u]) {
+    db.prepare("INSERT INTO lums (user_id, caption) VALUES (?,?)").run(aiIds[u], caption);
+  }
+}
 try {
   // Freshness on boot: if the newest post is old (or none), drop fresh activity
   const newest = db.prepare('SELECT MAX(created_at) m FROM posts').get().m;
   const stale = !newest || (Date.now() - new Date(String(newest).replace(' ', 'T') + 'Z').getTime() > 6 * 3600 * 1000);
-  if (stale) { aiPostNow(); aiPostNow(); }
+  if (stale) { aiPostNow(); aiPostNow(); aiPostNow(); }
   const activeStories = db.prepare("SELECT COUNT(*) c FROM stories WHERE expires_at > datetime('now')").get().c;
   if (!activeStories) aiStoryNow();
-  // While the instance is awake, an AI post lands every ~2.5 hours
-  const aiTimer = setInterval(() => { try { aiPostNow(); } catch (e) {} }, 2.5 * 3600 * 1000);
+  const freshLum = db.prepare("SELECT COUNT(*) c FROM lums WHERE created_at > datetime('now','-24 hours')").get().c;
+  if (!freshLum) aiLumNow();
+  // While the instance is awake, the bots keep the feed moving: a post every ~45 minutes
+  const aiTimer = setInterval(() => {
+    try {
+      aiPostNow();
+      if (Math.random() < 0.35) aiStoryNow();
+      if (Math.random() < 0.25) aiLumNow();
+    } catch (e) {}
+  }, 45 * 60 * 1000);
   if (aiTimer.unref) aiTimer.unref();
 } catch (e) { /* activity is best-effort */ }
 
