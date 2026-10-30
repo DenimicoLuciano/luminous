@@ -365,7 +365,7 @@ const Views = {
       ${streams.length ? streams.map(s => `
         <div class="card"><div class="row">
           ${avatarHtml(s)}<div class="grow"><div class="name"><b>${esc(s.display_name)}</b> ${badgesHtml(s)}</div>
-          <div class="post-time">${esc(s.title)} · 🪙 ${s.coins_earned}</div></div>
+          <div class="post-time">${esc(s.title)} · 👁 ${s.viewers_now || 0} watching · 🎤 ${s.on_stage || 0} on stage · 🪙 ${s.coins_earned}</div></div>
           <span class="live-badge">LIVE</span></div>
           <div class="mt"><a class="btn small" href="#/live/${s.id}">Join</a></div></div>`).join('')
         : `<div class="card center muted">Nobody is live right now.</div>`}`;
@@ -384,92 +384,476 @@ const Views = {
     let data;
     try { data = await API.get('/live/' + id); }
     catch (e) { el.innerHTML = `<div class="card center">Stream not found.</div>`; return; }
-    const isHost = App.user && App.user.id === data.stream.user_id;
+    const stream = data.stream;
+    const isHost = !!(App.user && App.user.id === stream.user_id);
+    const RTC_OK = typeof RTCPeerConnection !== 'undefined';
+    const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
     el.innerHTML = `
-      <div class="card">
-        <div class="row"><span class="live-badge">LIVE</span>
-          <div class="grow"><b>${esc(data.stream.display_name)}</b> ${badgesHtml(data.stream)}<div class="post-time">${esc(data.stream.title)}</div></div>
-          ${avatarHtml(data.stream)}</div>
-        <div class="stat-grid mt">
-          <div class="stat card"><div class="num" id="coinCount">${data.stream.coins_earned}</div><div class="muted">coins</div></div>
-          <div class="stat card"><div class="num" id="tapCount">0</div><div class="muted">your taps</div></div>
-        </div>
-        ${App.user ? `
-        <div class="tap-zone"><button class="tap-btn" id="tapBtn">👆</button><div class="muted mt">Tap! 10 taps = 5 coins</div></div>
-        <div class="gift-row">
-          <button class="btn small ghost" id="shareBtn">📣 Share ＋10</button>
-          <button class="btn small ghost" id="freeGiftBtn">🎁 Free gift</button>
-          <button class="btn small ghost" data-gift="10">🪙 10</button>
-          <button class="btn small ghost" data-gift="50">💰 50</button>
-          <button class="btn small ghost" data-gift="100">💎 100</button>
-        </div>` : `<div class="notice">Log in to tap, share, and send gifts.</div>`}
-        ${isHost ? `<div class="row mt">
-          <button class="btn small" id="withdrawBtn">Withdraw (needs 1,000 🪙)</button>
-          <button class="btn small ghost" id="endBtn">End stream</button></div>` : ''}
-        <h4>Activity</h4><div class="event-feed" id="eventFeed"></div>
-      </div>`;
-    const feed = document.getElementById('eventFeed');
-    const renderEvents = (events) => {
-      feed.innerHTML = events.map(e => `<div>🪙 ${esc(e.display_name || 'Someone')} · ${esc(e.kind)} · +${e.coins}${e.note ? ' · ' + esc(e.note) : ''}</div>`).join('') || '<div class="muted">No activity yet.</div>';
-      feed.scrollTop = feed.scrollHeight;
-    };
-    renderEvents(data.events);
+    <div class="live-room" id="lvRoom">
+      <div class="live-stage layout-1" id="lvStage"></div>
+      <div class="live-top">
+        <div class="live-host-chip">${avatarHtml(stream, 30)}<div class="lhc-txt"><b>${esc(stream.display_name)}</b><span>${esc(stream.title || '')}</span></div><span class="live-badge">LIVE</span></div>
+        <div class="live-top-right"><span class="live-pill">👁 <span id="lvViewers">${stream.viewers_now || 0}</span></span><span class="live-pill">🪙 <span id="lvCoins">${stream.coins_earned || 0}</span></span><button class="live-x" id="lvClose">✕</button></div>
+      </div>
+      <div class="live-invite hidden" id="lvInvite"></div>
+      <div class="live-hearts" id="lvHearts"></div>
+      <div class="live-rail">
+        <button class="rail-btn" id="lvTap">❤️<span>Like</span></button>
+        <button class="rail-btn" id="lvShare">↗️<span>Share</span></button>
+        <button class="rail-btn" id="lvGift">🎁<span>Gift</span></button>
+        ${isHost ? `<button class="rail-btn" id="lvHost">🎛️<span>Host</span></button>` : `<button class="rail-btn" id="lvStageBtn">🎤<span>Stage</span></button>`}
+      </div>
+      <div class="live-bottom">
+        <div class="live-chat" id="lvChat"></div>
+        ${App.user ? `<form class="live-comment" id="lvCommentForm"><input id="lvCommentIn" placeholder="Say something…" maxlength="300" autocomplete="off"><button class="btn small" type="submit">Send</button></form>`
+          : `<div class="live-comment"><button class="btn small grow" onclick="Views.authModal()">Log in to comment, tap & gift</button></div>`}
+        <div class="live-toggles hidden" id="lvToggles"><button class="rail-btn mini" id="lvMic">🎙️</button><button class="rail-btn mini" id="lvCam">📷</button></div>
+      </div>
+      <div class="live-sheet hidden" id="lvSheet"></div>
+      <div class="live-ended hidden" id="lvEnded"></div>
+    </div>`;
 
-    const poll = setInterval(async () => {
+    const $ = (x) => document.getElementById(x);
+    const stageEl = $('lvStage'), chatEl = $('lvChat'), sheetEl = $('lvSheet');
+    let participants = data.participants || [];
+    let myPart = data.me || null;
+    let onStage = false, localStream = null, destroyed = false, ended = false;
+    let lastSignalId = 0, stageSig = '', renderSig = '', prevMyStatus = myPart ? myPart.status : null;
+    const seenEvents = new Set();
+    const peers = new Map();      // stage mesh: uid -> {pc, stream, cand:[], remoteSet}
+    const viewerPcs = new Map();  // host -> viewer pcs
+    let recvPc = null, recvCand = [], recvRemoteSet = false, trackOrder = null;
+    const recvStreams = new Map();
+    const timers = [];
+    const every = (fn, ms) => { const t = setInterval(fn, ms); timers.push(t); };
+    const partOf = (uid) => participants.find(p => p.user_id === uid);
+    const nameOf = (uid) => { const p = partOf(uid); return p ? p.display_name : (uid === stream.user_id ? stream.display_name : 'Someone'); };
+    const stageUsers = () => participants.filter(p => p.status === 'joined' && ['host', 'cohost', 'guest'].includes(p.role));
+    const sigSend = (to, kind, payload) => API.post(`/live/${id}/signal`, { to_id: to, kind, payload: typeof payload === 'string' ? payload : JSON.stringify(payload || {}) }).catch(() => {});
+
+    /* ---------------- chat / events ---------------- */
+    function chatLine(html, sys) {
+      const d = document.createElement('div');
+      d.className = 'lv-msg' + (sys ? ' sys' : '');
+      d.innerHTML = html;
+      chatEl.appendChild(d);
+      while (chatEl.children.length > 60) chatEl.removeChild(chatEl.firstChild);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+    function showEvent(e) {
+      if (seenEvents.has(e.id)) return;
+      seenEvents.add(e.id);
+      if (e.kind === 'comment') chatLine(`<b>${esc(e.display_name || 'Someone')}</b> ${esc(e.note || '')}`);
+      else if (e.kind === 'gift') chatLine(`🎁 <b>${esc(e.display_name || 'Someone')}</b> sent ${e.coins} coins${e.note ? ' — ' + esc(e.note) : ''}`, true);
+      else if (e.kind === 'stage') chatLine(`🎤 <b>${esc(e.display_name || 'Someone')}</b> ${esc(e.note || '')}`, true);
+    }
+    (data.events || []).slice(-25).forEach(showEvent);
+
+    /* ---------------- stage rendering ---------------- */
+    function streamFor(uid) {
+      if (App.user && uid === App.user.id) return localStream;
+      const p = peers.get(uid);
+      if (p && p.stream) return p.stream;
+      return recvStreams.get(uid) || null;
+    }
+    function renderStage() {
+      const users = stageUsers();
+      const sig = users.map(u => u.user_id + ':' + (streamFor(u.user_id) ? 1 : 0)).join(',');
+      if (sig === renderSig) return;
+      renderSig = sig;
+      const n = users.length;
+      stageEl.className = 'live-stage ' + (n <= 1 ? 'layout-1' : n === 2 ? 'layout-2' : 'layout-multi');
+      stageEl.innerHTML = users.map(u => {
+        const s = streamFor(u.user_id);
+        return `<div class="live-box">${s ? `<video id="lv-vid-${u.user_id}" autoplay playsinline ${App.user && u.user_id === App.user.id ? 'muted' : ''}></video>`
+          : `<div class="live-box-empty"><div class="lbe-ava">${esc(u.avatar_emoji || '🎥')}</div><div class="muted">connecting…</div></div>`}
+          <div class="live-box-tag">${u.role === 'host' ? '👑' : '🎤'} ${esc(u.display_name)}</div></div>`;
+      }).join('') || `<div class="live-box"><div class="live-box-empty"><div class="lbe-ava">${esc(stream.avatar_emoji || '🔴')}</div><div class="muted">Waiting for the host's video…</div></div></div>`;
+      users.forEach(u => {
+        const v = document.getElementById('lv-vid-' + u.user_id);
+        const s = streamFor(u.user_id);
+        if (v && s && v.srcObject !== s) v.srcObject = s;
+      });
+    }
+
+    /* ---------------- WebRTC: stage mesh ---------------- */
+    function wirePc(pc, uid, store) {
+      pc.ontrack = (ev) => {
+        if (!store.stream) store.stream = new MediaStream();
+        if (!store.stream.getTracks().includes(ev.track)) store.stream.addTrack(ev.track);
+        renderStage();
+      };
+      pc.onicecandidate = (ev) => { if (ev.candidate) sigSend(uid, 'candidate', ev.candidate.toJSON()); };
+      pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') { /* poll will reconcile */ } };
+    }
+    function makePeer(uid) {
+      let p = peers.get(uid);
+      if (p) return p;
+      const pc = new RTCPeerConnection(ICE);
+      p = { pc, stream: null, cand: [], remoteSet: false };
+      peers.set(uid, p);
+      wirePc(pc, uid, p);
+      if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      return p;
+    }
+    async function flushCand(p, pc) {
+      for (const c of p.cand.splice(0)) { try { await pc.addIceCandidate(c); } catch (e) {} }
+    }
+    async function offerTo(uid) {
+      const p = makePeer(uid);
       try {
-        const d = await API.get('/live/' + id);
-        document.getElementById('coinCount').textContent = d.stream.coins_earned;
-        renderEvents(d.events);
-        if (d.stream.status !== 'live') { clearInterval(poll); clearInterval(watchTimer); toast('Stream ended'); }
+        const offer = await p.pc.createOffer();
+        await p.pc.setLocalDescription(offer);
+        sigSend(uid, 'offer', p.pc.localDescription.toJSON());
+      } catch (e) {}
+    }
+    function closePeer(uid) {
+      const p = peers.get(uid);
+      if (p) { try { p.pc.close(); } catch (e) {} peers.delete(uid); }
+      const v = viewerPcs.get(uid);
+      if (v) { try { v.close(); } catch (e) {} viewerPcs.delete(uid); }
+    }
+
+    /* ---------------- WebRTC: host -> viewer forwarding ---------------- */
+    function buildViewerLink(vuid) {
+      closePeer(vuid);
+      const pc = new RTCPeerConnection(ICE);
+      viewerPcs.set(vuid, pc);
+      const trackOwner = new Map();
+      const addSrc = (s, owner) => { if (s) s.getTracks().forEach(t => { pc.addTrack(t, s); trackOwner.set(t.id, owner); }); };
+      addSrc(localStream, App.user.id);
+      stageUsers().forEach(u => { if (u.user_id !== App.user.id) { const p = peers.get(u.user_id); if (p) addSrc(p.stream, u.user_id); } });
+      pc.onicecandidate = (ev) => { if (ev.candidate) sigSend(vuid, 'candidate', ev.candidate.toJSON()); };
+      const order = pc.getSenders().map(s => trackOwner.get(s.track.id) || App.user.id);
+      sigSend(vuid, 'track-map', { order });
+      pc.createOffer().then(o => pc.setLocalDescription(o)).then(() => sigSend(vuid, 'offer', pc.localDescription.toJSON())).catch(() => {});
+    }
+    function syncViewerLinks() {
+      if (!isHost || !onStage) return;
+      const viewers = participants.filter(p => p.role === 'viewer' && p.status === 'joined');
+      viewers.forEach(v => { if (!viewerPcs.has(v.user_id)) buildViewerLink(v.user_id); });
+      [...viewerPcs.keys()].forEach(uid => { if (!partOf(uid) || partOf(uid).role !== 'viewer') closePeer(uid); });
+    }
+    function rebuildViewerLinks() {
+      if (!isHost) return;
+      [...viewerPcs.keys()].forEach(uid => closePeer(uid));
+      syncViewerLinks();
+    }
+
+    /* ---------------- WebRTC: viewer receive ---------------- */
+    function mapRecvTracks() {
+      if (!recvPc || !trackOrder) return;
+      const groups = new Map();
+      recvPc.getReceivers().forEach((r, i) => {
+        const uid = trackOrder[i];
+        if (uid == null || !r.track) return;
+        if (!groups.has(uid)) groups.set(uid, new MediaStream());
+        const ms = groups.get(uid);
+        if (!ms.getTracks().includes(r.track)) ms.addTrack(r.track);
+      });
+      recvStreams.clear();
+      groups.forEach((ms, uid) => recvStreams.set(uid, ms));
+      renderSig = '';
+      renderStage();
+    }
+
+    /* ---------------- signaling ---------------- */
+    async function handleSignal(s) {
+      lastSignalId = Math.max(lastSignalId, s.id);
+      let payload = {};
+      try { payload = JSON.parse(s.payload || '{}'); } catch (e) { return; }
+      const from = s.from_id;
+      try {
+        if (s.kind === 'track-map') { trackOrder = payload.order || null; setTimeout(mapRecvTracks, 350); return; }
+        if (s.kind === 'bye') { closePeer(from); if (recvPc && from === stream.user_id) { /* host link may rebuild */ } renderStage(); return; }
+        if (s.kind === 'candidate') {
+          const cand = new RTCIceCandidate(payload);
+          if (recvPc && from === stream.user_id && !peers.has(from)) { if (recvRemoteSet) { try { await recvPc.addIceCandidate(cand); } catch (e) {} } else recvCand.push(cand); return; }
+          const vp = viewerPcs.get(from);
+          if (vp) { try { await vp.addIceCandidate(cand); } catch (e) {} return; }
+          const p = peers.get(from);
+          if (p) { if (p.remoteSet) { try { await p.pc.addIceCandidate(cand); } catch (e) {} } else p.cand.push(cand); }
+          return;
+        }
+        if (s.kind === 'offer') {
+          const fromPart = partOf(from);
+          const fromIsStage = fromPart && fromPart.status === 'joined' && ['host', 'cohost', 'guest'].includes(fromPart.role);
+          if (onStage && fromIsStage) {
+            const p = makePeer(from);
+            await p.pc.setRemoteDescription(new RTCSessionDescription(payload));
+            p.remoteSet = true; await flushCand(p, p.pc);
+            const ans = await p.pc.createAnswer();
+            await p.pc.setLocalDescription(ans);
+            sigSend(from, 'answer', p.pc.localDescription.toJSON());
+          } else if (!onStage && from === stream.user_id) {
+            if (recvPc) { try { recvPc.close(); } catch (e) {} }
+            recvPc = new RTCPeerConnection(ICE);
+            recvRemoteSet = false; recvCand = [];
+            recvPc.ontrack = () => setTimeout(mapRecvTracks, 350);
+            recvPc.onicecandidate = (ev) => { if (ev.candidate) sigSend(from, 'candidate', ev.candidate.toJSON()); };
+            await recvPc.setRemoteDescription(new RTCSessionDescription(payload));
+            recvRemoteSet = true;
+            for (const c of recvCand.splice(0)) { try { await recvPc.addIceCandidate(c); } catch (e) {} }
+            const ans = await recvPc.createAnswer();
+            await recvPc.setLocalDescription(ans);
+            sigSend(from, 'answer', recvPc.localDescription.toJSON());
+            setTimeout(mapRecvTracks, 600);
+          }
+          return;
+        }
+        if (s.kind === 'answer') {
+          const vp = viewerPcs.get(from);
+          if (vp) { try { await vp.setRemoteDescription(new RTCSessionDescription(payload)); } catch (e) {} return; }
+          const p = peers.get(from);
+          if (p) { await p.pc.setRemoteDescription(new RTCSessionDescription(payload)); p.remoteSet = true; await flushCand(p, p.pc); }
+          return;
+        }
+      } catch (e) { /* ignore malformed signal */ }
+    }
+
+    /* ---------------- stage presence ---------------- */
+    async function startStage() {
+      if (onStage || destroyed) return;
+      if (!RTC_OK) { toast('Live video is not supported in this browser'); return; }
+      try { localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
+      catch (e) { toast('Camera/mic permission is needed to join the stage 🎤'); return; }
+      onStage = true;
+      $('lvToggles').classList.remove('hidden');
+      renderSig = ''; renderStage();
+      // full mesh: I initiate to stage members with a higher user id (lower id offers — same rule as calls)
+      stageUsers().forEach(u => { if (App.user && u.user_id > App.user.id) offerTo(u.user_id); });
+      if (isHost) syncViewerLinks();
+    }
+    function stopStage() {
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+      [...peers.keys()].forEach(uid => { sigSend(uid, 'bye', {}); closePeer(uid); });
+      if (isHost) [...viewerPcs.keys()].forEach(uid => closePeer(uid));
+      onStage = false;
+      $('lvToggles').classList.add('hidden');
+      renderSig = ''; renderStage();
+    }
+
+    /* ---------------- sheets (gifts / stage / host) ---------------- */
+    function openSheet(html) { sheetEl.innerHTML = html + `<button class="btn ghost small mt" id="lvSheetClose" style="width:100%">Close</button>`; sheetEl.classList.remove('hidden'); $('lvSheetClose').onclick = closeSheet; }
+    function closeSheet() { sheetEl.classList.add('hidden'); sheetEl.innerHTML = ''; }
+    let freeCooldown = false;
+    async function openGifts() {
+      let bal = '—';
+      try { const w = await API.get('/wallet'); bal = w.wallet ? w.wallet.coins : 0; } catch (e) {}
+      openSheet(`<h4>🎁 Send a gift</h4><div class="muted">Your wallet: 🪙 <span id="lvBal">${bal}</span></div>
+        <div class="gift-row mt"><button class="btn small ghost" id="lvFreeGift">🎁 Free gift (+1)</button>
+        <button class="btn small ghost" data-gift="10">🪙 10</button><button class="btn small ghost" data-gift="50">💰 50</button>
+        <button class="btn small ghost" data-gift="100">💎 100</button><button class="btn small ghost" data-gift="500">👑 500</button></div>
+        <div class="muted mt">Gifts go to ${esc(stream.display_name)}'s stream. Free gift every 20s.</div>`);
+      $('lvFreeGift').onclick = async () => {
+        if (freeCooldown) { toast('Free gift cooling down… ⏳'); return; }
+        const r = await API.post(`/live/${id}/free-gift`).catch(() => null);
+        if (r && !r.cooldown) { toast('Free gift sent! 🎁'); freeCooldown = true; setTimeout(() => freeCooldown = false, 20000); }
+        else toast('Free gift cooling down… ⏳');
+      };
+      sheetEl.querySelectorAll('[data-gift]').forEach(b => b.onclick = async () => {
+        const coins = +b.dataset.gift;
+        try { await API.post(`/live/${id}/gift`, { coins }); toast(`Sent ${coins} coins! 🪙`); App.refreshAuth(); closeSheet(); }
+        catch (e) { toast(e.data?.error || 'Could not send gift'); }
+      });
+    }
+    function openStageSheet() {
+      const mine = myPart;
+      let body = '';
+      if (mine && mine.role === 'cohost' && mine.status === 'invited') {
+        body = `<p>👑 You've been invited to co-host this stream.</p><div class="row"><button class="btn small" id="lvAccept">Accept & join stage</button><button class="btn small ghost" id="lvDecline">Decline</button></div>`;
+      } else if (onStage) {
+        body = `<p>You're on stage 🎤</p><button class="btn small ghost" id="lvLeave">Leave stage</button>`;
+      } else if (mine && mine.status === 'requested') {
+        body = `<p>⏳ Waiting for ${esc(stream.display_name)} to approve your request…</p><button class="btn small ghost" id="lvLeave">Cancel request</button>`;
+      } else {
+        body = `<p>Ask ${esc(stream.display_name)} to bring you on stage as a guest.</p><button class="btn small" id="lvRequest">🎤 Request to join stage</button>`;
+      }
+      const on = stageUsers();
+      body += `<h4 class="mt">On stage (${on.length}/6)</h4>` + (on.map(u => `<div class="row"><span class="grow">${u.role === 'host' ? '👑' : '🎤'} ${esc(u.display_name)}</span></div>`).join('') || '<div class="muted">Nobody yet.</div>');
+      openSheet(`<h4>🎤 Stage</h4>` + body);
+      const acc = $('lvAccept'), dec = $('lvDecline'), req = $('lvRequest'), lev = $('lvLeave');
+      if (acc) acc.onclick = async () => { await API.post(`/live/${id}/respond-invite`, { accept: true }).catch(() => {}); closeSheet(); pollState(); };
+      if (dec) dec.onclick = async () => { await API.post(`/live/${id}/respond-invite`, { accept: false }).catch(() => {}); closeSheet(); pollState(); };
+      if (req) req.onclick = async () => { try { await API.post(`/live/${id}/request-guest`); toast('Request sent 🎤'); closeSheet(); pollState(); } catch (e) { toast(e.data?.error || 'Could not request'); } };
+      if (lev) lev.onclick = async () => { stopStage(); await API.post(`/live/${id}/leave-stage`).catch(() => {}); closeSheet(); pollState(); };
+    }
+    function openHostSheet(d) {
+      const reqs = participants.filter(p => p.status === 'requested');
+      const invited = participants.filter(p => p.status === 'invited');
+      const on = stageUsers();
+      openSheet(`<h4>🎛️ Host controls</h4>
+        <div class="muted">🪙 ${d.stream.coins_earned} coins · 👁 ${d.stream.viewers_now} watching · peak ${d.stream.viewers || 0}</div>
+        <h4 class="mt">Guest requests</h4>
+        ${reqs.length ? reqs.map(p => `<div class="row"><span class="grow">🎤 ${esc(p.display_name)}</span><button class="btn small" data-acc="${p.user_id}">✓ Bring on</button><button class="btn small ghost" data-den="${p.user_id}">✗</button></div>`).join('') : '<div class="muted">No requests right now.</div>'}
+        ${invited.length ? `<div class="muted mt">Invited, waiting: ${invited.map(p => esc(p.display_name)).join(', ')}</div>` : ''}
+        <h4 class="mt">Invite a co-host</h4>
+        <div class="row"><input id="lvCohostIn" placeholder="Username" class="grow"><button class="btn small" id="lvCohostBtn">Invite</button></div>
+        <h4 class="mt">On stage (${on.length}/6)</h4>
+        ${on.map(u => `<div class="row"><span class="grow">${u.role === 'host' ? '👑' : '🎤'} ${esc(u.display_name)}</span>${u.user_id !== App.user.id ? `<button class="btn small ghost" data-rem="${u.user_id}">Remove</button>` : ''}</div>`).join('')}
+        <div class="row mt"><button class="btn small" id="lvWithdraw">Withdraw (needs 1,000 🪙)</button><button class="btn small ghost" id="lvEnd">End stream</button></div>`);
+      sheetEl.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { await API.post(`/live/${id}/decide-guest`, { user_id: +b.dataset.acc, approve: true }).catch(() => {}); await pollState(); openHostSheet(lastData); });
+      sheetEl.querySelectorAll('[data-den]').forEach(b => b.onclick = async () => { await API.post(`/live/${id}/decide-guest`, { user_id: +b.dataset.den, approve: false }).catch(() => {}); await pollState(); openHostSheet(lastData); });
+      sheetEl.querySelectorAll('[data-rem]').forEach(b => b.onclick = async () => { await API.post(`/live/${id}/remove`, { user_id: +b.dataset.rem }).catch(() => {}); await pollState(); openHostSheet(lastData); });
+      $('lvCohostBtn').onclick = async () => {
+        const username = $('lvCohostIn').value.trim();
+        if (!username) return;
+        try { await API.post(`/live/${id}/invite-cohost`, { username }); toast('Co-host invite sent 👑'); await pollState(); openHostSheet(lastData); }
+        catch (e) { toast(e.data?.error || 'Could not invite'); }
+      };
+      $('lvWithdraw').onclick = async () => {
+        try { const r = await API.post(`/live/${id}/withdraw`); toast(`Withdrew ${r.withdrawn} coins! 🪙`); App.checkMilestones(); App.refreshAuth(); }
+        catch (e) { toast(e.data?.error || 'Withdrawal failed'); }
+      };
+      $('lvEnd').onclick = endStream;
+    }
+
+    /* ---------------- end / cleanup ---------------- */
+    let lastData = data;
+    async function endStream() {
+      if (!confirm('End this stream? Coins move to your wallet.')) return;
+      let earned = stream.coins_earned;
+      try { const r = await API.post(`/live/${id}/end`); earned = r.earned != null ? r.earned : earned; } catch (e) {}
+      App.checkMilestones(); App.refreshAuth();
+      showEnded(earned);
+    }
+    function showEnded(earned) {
+      if (ended) return;
+      ended = true;
+      stopStage();
+      timers.forEach(clearInterval);
+      $('lvEnded').innerHTML = `<div class="card center"><h3>Stream ended</h3>
+        <div class="muted">${isHost ? `You earned 🪙 ${earned || 0} coins this stream.` : 'Thanks for watching!'}</div>
+        <div class="mt"><a class="btn" href="#/live">Back to Live</a></div></div>`;
+      $('lvEnded').classList.remove('hidden');
+    }
+    function cleanup() {
+      if (destroyed) return;
+      destroyed = true;
+      timers.forEach(clearInterval);
+      if (window._liveCleanup === cleanup) window._liveCleanup = null;
+      [...peers.keys()].forEach(uid => sigSend(uid, 'bye', {}));
+      if (recvPc) sigSend(stream.user_id, 'bye', {});
+      [...peers.keys()].forEach(uid => closePeer(uid));
+      if (recvPc) { try { recvPc.close(); } catch (e) {} recvPc = null; }
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      if (onStage && !isHost && App.user) API.post(`/live/${id}/leave-stage`).catch(() => {});
+      onStage = false;
+    }
+    window._liveCleanup = cleanup;
+
+    /* ---------------- polling ---------------- */
+    async function pollState() {
+      if (destroyed || ended) return;
+      let d;
+      try { d = await API.get('/live/' + id); } catch (e) { return; }
+      lastData = d;
+      if (d.stream.status !== 'live') { showEnded(d.stream.coins_earned); return; }
+      $('lvViewers').textContent = d.stream.viewers_now || 0;
+      $('lvCoins').textContent = d.stream.coins_earned || 0;
+      participants = d.participants || [];
+      const prevStatus = prevMyStatus;
+      myPart = d.me || myPart;
+      // my-stage transitions
+      if (App.user && myPart) {
+        if (myPart.status === 'invited' && myPart.role === 'cohost') renderInvite();
+        else $('lvInvite').classList.add('hidden');
+        if (myPart.status === 'joined' && ['guest', 'cohost'].includes(myPart.role) && !onStage) startStage();
+        if (myPart.status === 'kicked' && onStage) { toast('The host removed you from the stage'); stopStage(); }
+        if (prevStatus === 'requested' && myPart.status === 'denied') toast('The host passed on your stage request this time');
+        prevMyStatus = myPart.status;
+      }
+      // events
+      (d.events || []).forEach(showEvent);
+      // stage composition changes
+      const sig = stageUsers().map(u => u.user_id).join(',');
+      const changed = sig !== stageSig;
+      stageSig = sig;
+      renderStage();
+      if (changed) {
+        if (onStage) stageUsers().forEach(u => { if (App.user && u.user_id > App.user.id && !peers.has(u.user_id)) offerTo(u.user_id); });
+        if (isHost && onStage) rebuildViewerLinks();
+      }
+      if (isHost) syncViewerLinks();
+      // drop peers for people who left the stage
+      if (onStage) [...peers.keys()].forEach(uid => { const p = partOf(uid); if (!p || p.status !== 'joined') closePeer(uid); });
+    }
+    function renderInvite() {
+      const inv = $('lvInvite');
+      inv.innerHTML = `<span>👑 <b>${esc(stream.display_name)}</b> invited you to co-host!</span><span class="row"><button class="btn small" id="lvInvAcc">Accept</button><button class="btn small ghost" id="lvInvDec">Decline</button></span>`;
+      inv.classList.remove('hidden');
+      $('lvInvAcc').onclick = async () => { await API.post(`/live/${id}/respond-invite`, { accept: true }).catch(() => {}); inv.classList.add('hidden'); pollState(); };
+      $('lvInvDec').onclick = async () => { await API.post(`/live/${id}/respond-invite`, { accept: false }).catch(() => {}); inv.classList.add('hidden'); pollState(); };
+    }
+    async function pollSignals() {
+      if (destroyed || ended || !App.user) return;
+      try {
+        const { signals } = await API.get(`/live/${id}/signals?since=${lastSignalId}`);
+        for (const s of signals) await handleSignal(s);
       } catch (e) { /* ignore */ }
-    }, 5000);
+    }
 
-    // watch heartbeat: +2 coins/min
-    const watchTimer = setInterval(() => { if (App.user) API.post(`/live/${id}/watch`).catch(() => {}); }, 60000);
-    if (App.user) API.post(`/live/${id}/watch`).catch(() => {});
-
-    if (!App.user) return;
+    /* ---------------- rail + comment wiring ---------------- */
     let taps = 0, tapTimer = null;
     const flushTaps = () => {
       if (taps <= 0) return;
       const n = taps; taps = 0;
-      document.getElementById('tapCount').textContent = '0';
       API.post(`/live/${id}/tap`, { taps: n }).catch(() => {});
     };
-    document.getElementById('tapBtn').onclick = () => {
+    $('lvTap').onclick = () => {
+      if (!App.user) { toast('Log in to like 💜'); return; }
       taps++;
-      document.getElementById('tapCount').textContent = taps;
-      clearTimeout(tapTimer); tapTimer = setTimeout(flushTaps, 1500);
+      const h = document.createElement('div');
+      h.className = 'lv-heart';
+      h.textContent = ['❤️', '💜', '💛', '✨'][Math.floor(Math.random() * 4)];
+      h.style.right = (8 + Math.random() * 30) + 'px';
+      $('lvHearts').appendChild(h);
+      setTimeout(() => h.remove(), 1800);
+      clearTimeout(tapTimer); tapTimer = setTimeout(flushTaps, 1200);
+      if (taps >= 10) flushTaps();
     };
-    document.getElementById('shareBtn').onclick = async () => {
+    $('lvShare').onclick = async () => {
+      if (!App.user) { toast('Log in to share 📣'); return; }
       const r = await API.post(`/live/${id}/share`).catch(() => null);
-      toast(r && !r.already ? 'Shared! ＋10 coins 📣' : 'Already shared');
+      toast(r && !r.already ? 'Shared! +10 coins 📣' : 'Already shared');
     };
-    let freeCooldown = false;
-    document.getElementById('freeGiftBtn').onclick = async () => {
-      if (freeCooldown) { toast('Free gift cooling down… ⏳'); return; }
-      const r = await API.post(`/live/${id}/free-gift`).catch(() => null);
-      if (r && !r.cooldown) { toast('Free gift sent! 🎁'); freeCooldown = true; setTimeout(() => freeCooldown = false, 20000); }
-      else toast('Free gift cooling down… ⏳');
+    $('lvGift').onclick = () => { if (!App.user) { toast('Log in to send gifts 🎁'); return; } openGifts(); };
+    const sb = $('lvStageBtn'); if (sb) sb.onclick = openStageSheet;
+    const hb = $('lvHost'); if (hb) hb.onclick = () => openHostSheet(lastData);
+    $('lvClose').onclick = () => { if (isHost) endStream(); else { cleanup(); location.hash = '#/live'; } };
+    const cf = $('lvCommentForm');
+    if (cf) cf.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const inp = $('lvCommentIn');
+      const text = inp.value.trim();
+      if (!text) return;
+      inp.value = '';
+      try {
+        const r = await API.post(`/live/${id}/comment`, { text });
+        showEvent({ id: r.id, kind: 'comment', display_name: App.user.display_name, note: text });
+      } catch (e) { toast('Could not send comment'); }
     };
-    el.querySelectorAll('[data-gift]').forEach(b => b.onclick = async () => {
-      const coins = +b.dataset.gift;
-      try { await API.post(`/live/${id}/gift`, { coins }); toast(`Sent ${coins} coins! 🪙`); App.refreshAuth(); }
-      catch (e) { toast(e.data?.error || 'Could not send gift'); }
-    });
-    if (isHost) {
-      document.getElementById('withdrawBtn').onclick = async () => {
-        try { const r = await API.post(`/live/${id}/withdraw`); toast(`Withdrew ${r.withdrawn} coins! 🪙`); App.checkMilestones(); App.refreshAuth(); }
-        catch (e) { toast(e.data?.error || 'Withdrawal failed'); }
-      };
-      document.getElementById('endBtn').onclick = async () => {
-        if (!confirm('End this stream? Coins move to your wallet.')) return;
-        await API.post(`/live/${id}/end`).catch(() => {});
-        clearInterval(poll); clearInterval(watchTimer);
-        App.checkMilestones(); App.refreshAuth();
-        location.hash = '#/live';
-      };
+    const mic = $('lvMic'), cam = $('lvCam');
+    if (mic) mic.onclick = () => { if (!localStream) return; const t = localStream.getAudioTracks()[0]; if (t) { t.enabled = !t.enabled; mic.classList.toggle('off', !t.enabled); mic.textContent = t.enabled ? '🎙️' : '🔇'; } };
+    if (cam) cam.onclick = () => { if (!localStream) return; const t = localStream.getVideoTracks()[0]; if (t) { t.enabled = !t.enabled; cam.classList.toggle('off', !t.enabled); cam.textContent = t.enabled ? '📷' : '🚫'; } };
+
+    /* ---------------- boot ---------------- */
+    renderStage();
+    if (App.user) {
+      try {
+        const j = await API.post(`/live/${id}/join`);
+        if (j && j.participant) { myPart = { ...(myPart || {}), ...j.participant }; prevMyStatus = myPart.status; }
+      } catch (e) {}
+      API.post(`/live/${id}/watch`).catch(() => {});
+      every(() => { if (!destroyed && !ended) API.post(`/live/${id}/heartbeat`).catch(() => {}); }, 15000);
+      every(() => { if (!destroyed && !ended) API.post(`/live/${id}/watch`).catch(() => {}); }, 60000);
+      every(pollSignals, 1400);
+      if (isHost || (myPart && ['guest', 'cohost'].includes(myPart.role) && myPart.status === 'joined')) startStage();
+      if (myPart && myPart.status === 'invited' && myPart.role === 'cohost') renderInvite();
     }
+    every(pollState, 3000);
   },
 
   /* ---------------- MENTORS ---------------- */
