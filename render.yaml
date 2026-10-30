@@ -1,7 +1,7 @@
 # Render blueprint: one Docker web service on the free plan.
-# Free services cannot attach persistent disks, so app data is ephemeral
-# and resets on redeploy or restart. Move the plan to starter and re-add
-# a disk block (mountPath /app/data) to make data permanent.
+# App data lives in a Turso cloud database (TURSO_* env vars, set in the
+# dashboard) so accounts survive redeploys. Without them the app falls
+# back to a local file, which is ephemeral on the free plan.
 services:
   - type: web
     name: luminous
@@ -14,6 +14,10 @@ services:
         value: production
       - key: DATA_DIR
         value: /app/data
+      - key: TURSO_DATABASE_URL
+        sync: false # set in the Render dashboard — free cloud DB for permanent accounts
+      - key: TURSO_AUTH_TOKEN
+        sync: false # set in the Render dashboard
       - key: OPENAI_API_KEY
         sync: false # set in the Render dashboard — AI mentors/companions need this
       - key: OPENAI_MODEL
