@@ -34,7 +34,8 @@ const AI_CONFIGURED = () => !!process.env.OPENAI_API_KEY;
 async function callAI(system, messages) {
   if (!AI_CONFIGURED()) return null;
   const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
