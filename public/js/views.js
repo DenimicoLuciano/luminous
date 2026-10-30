@@ -943,7 +943,7 @@ const Views = {
       <div class="mt"><a class="btn small ghost" href="#/companions">💜 My AI Companions</a></div></div>
       ${aiConfigured ? '' : aiNotice()}
       <div class="mentor-grid">` + mentors.map(m => `
-        <div class="card mentor-card" data-key="${esc(m.key)}">
+        <div class="card mentor-card" data-key="${esc(m.key || m.KEY)}">
           <div class="big">${esc(m.emoji)}</div><b>${esc(m.name)}</b>
           <div class="muted">${esc(m.tagline)}</div></div>`).join('') + `</div>`;
     el.querySelectorAll('.mentor-card').forEach(c => c.onclick = () => location.hash = '#/mentors/' + c.dataset.key);
@@ -951,7 +951,7 @@ const Views = {
 
   async mentorChat(el, key) {
     const { mentors, aiConfigured } = await API.get('/mentors');
-    const m = mentors.find(x => x.key === key);
+    const m = mentors.find(x => (x.key || x.KEY) === key);
     if (!m) { el.innerHTML = `<div class="card">Mentor not found.</div>`; return; }
     el.innerHTML = `<div class="card">
       <div class="row"><div style="font-size:36px">${esc(m.emoji)}</div>
