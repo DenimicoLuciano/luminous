@@ -435,7 +435,10 @@ app.post('/api/lums/:id/view', optionalAuth, (req, res) => {
 // ---------- AI mentors ----------
 app.get('/api/mentors', (req, res) => {
   const rows = db.prepare('SELECT id, key, name, tagline, emoji FROM mentors').all();
-  res.json({ mentors: rows, aiConfigured: AI_CONFIGURED() });
+  // The Turso/libsql driver returns the `key` column as `KEY` — normalize it,
+  // or the client reads m.key as undefined and every mentor chat 404s.
+  const mentors = rows.map(r => ({ id: r.id, key: r.key ?? r.KEY, name: r.name, tagline: r.tagline, emoji: r.emoji }));
+  res.json({ mentors, aiConfigured: AI_CONFIGURED() });
 });
 
 function getOrCreateConversation(userId, kind, refId) {
