@@ -72,6 +72,138 @@ function mountNetAds(root) {
 const aiNotice = () => `<div class="notice">🤖 <b>AI is not configured on this server yet.</b><br>
   <span class="muted">The server owner needs to set an <code>OPENAI_API_KEY</code> environment variable and redeploy. Everything else in Luminous works without it.</span></div>`;
 
+/* ---------------- appearance customization (per-screen backgrounds + accent) ----------------
+   Saved ONLY in this browser (localStorage), like the ChatGPT concept:
+   keys luminous_bg_<screen> per screen + luminous_accent for the accent color. */
+const Appearance = {
+  SCREENS: [
+    { key: 'home', label: 'Home' },
+    { key: 'discover', label: 'Discover' },
+    { key: 'live', label: 'Live' },
+    { key: 'profile', label: 'Profile' },
+    { key: 'messages', label: 'Messages / Chat' },
+  ],
+  GRADIENTS: [
+    { name: 'Midnight Violet', css: 'linear-gradient(160deg,#241048 0%,#120826 55%,#2b0a33 100%)' },
+    { name: 'Nebula Plum', css: 'linear-gradient(150deg,#3b1160 0%,#170a30 52%,#4a0e3f 100%)' },
+    { name: 'Starfall Deep', css: 'linear-gradient(165deg,#0b1030 0%,#170b33 60%,#05070f 100%)' },
+    { name: 'Rose Eclipse', css: 'linear-gradient(155deg,#330b2e 0%,#180826 55%,#12061f 100%)' },
+    { name: 'Aurora Mystery', css: 'linear-gradient(150deg,#0d2133 0%,#1c0b38 58%,#2e0a3a 100%)' },
+    { name: 'Ember Dusk', css: 'linear-gradient(160deg,#2e1408 0%,#1a0a2a 55%,#0d0618 100%)' },
+  ],
+  SOLIDS: ['#0d0716', '#150b26', '#1d0f38', '#2a1245', '#30162b', '#0a1a2f', '#101b10', '#2b0a10'],
+  ACCENTS: [
+    { name: 'Violet', value: '#a855f7' },
+    { name: 'Magenta', value: '#ec4899' },
+    { name: 'Lavender', value: '#c084fc' },
+    { name: 'Fuchsia', value: '#d946ef' },
+    { name: 'Star Gold', value: '#e9c46a' },
+    { name: 'Moon Teal', value: '#2dd4bf' },
+    { name: 'Ice Blue', value: '#60a5fa' },
+  ],
+  DEFAULT: () => ({ type: 'gradient', gradient: 0, color: '#150b26', overlay: 45, photo: null }),
+
+  key(screen) { return 'luminous_bg_' + screen; },
+  load(screen) {
+    try { const raw = localStorage.getItem(this.key(screen)); return raw ? { ...this.DEFAULT(), ...JSON.parse(raw) } : null; }
+    catch (e) { return null; }
+  },
+  save(screen, cfg) {
+    try { localStorage.setItem(this.key(screen), JSON.stringify(cfg)); return true; }
+    catch (e) { return false; } // quota — usually a photo that is still too large
+  },
+  reset(screen) { try { localStorage.removeItem(this.key(screen)); } catch (e) {} },
+  resetAll() { this.SCREENS.forEach(s => this.reset(s.key)); },
+
+  cssFor(cfg) {
+    if (!cfg) return '';
+    if (cfg.type === 'photo' && cfg.photo) return `url("${cfg.photo}")`;
+    if (cfg.type === 'solid') return cfg.color || '#150b26';
+    const g = this.GRADIENTS[cfg.gradient || 0] || this.GRADIENTS[0];
+    return g.css;
+  },
+  styleFor(cfg) {
+    if (!cfg) return '';
+    if (cfg.type === 'photo' && cfg.photo) return `background-image:url("${cfg.photo}");background-size:cover;background-position:center`;
+    return `background:${this.cssFor(cfg)}`;
+  },
+
+  applyCfg(cfg) {
+    const bg = document.getElementById('screenBg');
+    const shade = document.getElementById('screenShade');
+    if (!bg || !shade) return;
+    if (!cfg) {
+      bg.style.background = ''; bg.style.backgroundImage = '';
+      shade.style.opacity = '0';
+      document.body.classList.remove('has-custom-bg');
+      return;
+    }
+    if (cfg.type === 'photo' && cfg.photo) {
+      bg.style.background = '';
+      bg.style.backgroundImage = `url("${cfg.photo}")`;
+    } else {
+      bg.style.backgroundImage = '';
+      bg.style.background = this.cssFor(cfg);
+    }
+    shade.style.opacity = String(Math.min(90, Math.max(0, cfg.overlay ?? 45)) / 100);
+    document.body.classList.add('has-custom-bg');
+  },
+  screenForHash(hash) {
+    if (!hash || hash === '#/' || hash === '#') return 'home';
+    if (hash === '#/discover') return 'discover';
+    if (hash === '#/live' || hash.startsWith('#/live/')) return 'live';
+    if (hash.startsWith('#/profile')) return 'profile';
+    if (hash === '#/friends' || hash.startsWith('#/chat/')) return 'messages';
+    return null; // other screens keep the standard mystery theme
+  },
+  applyForHash(hash) { this.applyCfg(this.screenForHash(hash) ? this.load(this.screenForHash(hash)) : null); },
+  applyForScreen(screen) { this.applyCfg(screen ? this.load(screen) : null); },
+
+  accent() { try { return localStorage.getItem('luminous_accent') || '#a855f7'; } catch (e) { return '#a855f7'; } },
+  setAccent(v) {
+    try { localStorage.setItem('luminous_accent', v); } catch (e) {}
+    document.documentElement.style.setProperty('--accent', v);
+  },
+  initAccent() { document.documentElement.style.setProperty('--accent', this.accent()); },
+
+  downscalePhoto(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        try {
+          const MAX = 1280;
+          const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          cv.getContext('2d').drawImage(img, 0, 0, w, h);
+          URL.revokeObjectURL(url);
+          resolve(cv.toDataURL('image/jpeg', 0.82));
+        } catch (e) { URL.revokeObjectURL(url); reject(e); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('bad image')); };
+      img.src = url;
+    });
+  },
+};
+
+/* video (Lum) card used by the feed's Video tab — real /lums data */
+function lumCard(l) {
+  return `<div class="card lum-card">
+    <div class="post-head">
+      <a href="#/profile/${esc(l.username)}">${avatarHtml(l)}</a>
+      <div class="post-meta grow">
+        <div class="name"><a href="#/profile/${esc(l.username)}" style="color:inherit">${esc(l.display_name)}</a>${badgesHtml(l)}</div>
+        <div class="post-time">@${esc(l.username)} · 🎬 Lum · 👁 ${l.views || 0}</div>
+      </div>
+    </div>
+    ${l.video_url ? `<a href="#/lums"><video src="${esc(l.video_url)}" muted playsinline preload="metadata"></video></a>` : ''}
+    ${l.caption ? `<div class="post-content">${esc(l.caption)}</div>` : ''}
+  </div>`;
+}
+
 /* ---------------- friends helpers ---------------- */
 function tierChip(t) {
   if (!t) return '';
@@ -260,20 +392,172 @@ async function loadPlannedPosts() {
 
 const Views = {
 
-  /* ---------------- FEED ---------------- */
+  /* ---------------- FEED (Home: stories row · tabs · composer) ---------------- */
   async feed(el) {
     el.innerHTML = `<div class="card center"><div class="muted">Loading your feed…</div></div>`;
+    let posts = [], trays = [], friendNames = new Set(), statusByUser = {};
     try {
-      const { posts } = await API.get('/feed?limit=30');
+      const feedData = await API.get('/feed?limit=30');
+      posts = feedData.posts || [];
       await CONFIG_READY;
-      if (!posts.length) { el.innerHTML = `<div class="card center">No posts yet — be the first! <div class="mt"><a class="btn" href="#/create">Create a post</a></div></div>`; return; }
+    } catch (e) { el.innerHTML = `<div class="card center">Couldn't load the feed. Try again.</div>`; return; }
+    // stories + friends are best-effort extras on top of the feed
+    try { const s = await API.get('/stories'); trays = s.trays || []; } catch (e) { /* no stories row */ }
+    if (App.user) {
+      try {
+        const f = await API.get('/friends');
+        (f.friends || []).forEach(fr => { friendNames.add(fr.user.username); if (fr.user.status) statusByUser[fr.user.username] = fr.user.status; });
+      } catch (e) { /* Following tab will just show your own posts */ }
+    }
+    Views._trays = trays;
+
+    /* ---- stories row (real trays from /stories; own circle first) ---- */
+    const statusDot = (username, own) => {
+      const st = own ? (App.user && App.user.status) : statusByUser[username];
+      return st ? `<span class="story-online ${st === 'active' ? '' : esc(st)}" title="${esc(st)}"></span>` : '';
+    };
+    const ownTray = App.user ? trays.find(t => t.user.username === App.user.username) : null;
+    const otherTrays = trays.filter(t => !App.user || t.user.username !== App.user.username);
+    const storyItem = (t, i) => `
+      <div class="story-item"><button class="story-dot" data-story="${i}" aria-label="${esc(t.user.display_name)}'s story">
+        <span class="story-ring2"><span>${esc(t.user.avatar_emoji || '✦')}</span></span>${statusDot(t.user.username, false)}</button>
+        <div class="story-name">${esc(t.user.username)}</div></div>`;
+    const storiesHtml = `
+      <div class="story-item own"><button class="story-dot" id="yourStory" aria-label="Your story">
+        <span class="story-ring2"><span>${App.user ? esc(App.user.avatar_emoji || '✦') : '✦'}</span></span>
+        <span class="story-plus">＋</span>${statusDot(null, true)}</button>
+        <div class="story-name">Your story</div></div>
+      ${otherTrays.map(storyItem).join('')}`;
+
+    /* ---- composer (concept card; posts through the existing /posts flow) ---- */
+    const composerHtml = App.user ? `
+      <div class="card composer">
+        <div class="row">${avatarHtml(App.user, 46)}<div class="composer-bubble">What's happening in your world?</div></div>
+        <textarea id="cmpText" maxlength="2000" placeholder="Write a caption or share a moment…"></textarea>
+        <div class="feel-row" id="cmpFeelRow"></div>
+        <div class="muted mt" id="cmpMeta" style="display:none"></div>
+        <div class="row composer-foot">
+          <button class="chip-btn" id="cmpMediaBtn">▦ Photo / video</button>
+          <button class="chip-btn" id="cmpFeelBtn">◎ Feeling</button>
+          <span class="grow"></span>
+          <button class="btn" id="cmpPost">＋ Post</button>
+        </div>
+        <input type="file" id="cmpFile" accept="image/*,video/*" class="hidden">
+      </div>` : `
+      <div class="card composer center">
+        <div style="font-size:17px;font-weight:800">✦ What's happening in your world?</div>
+        <div class="muted mt">Log in to post, share stories and go live.</div>
+        <div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div>
+      </div>`;
+
+    el.innerHTML = `
+      <section class="panel">
+        <div class="stories-head"><h3>Stories</h3><a class="add-story" href="#/create">＋ Add story</a></div>
+        <div class="stories-row">${storiesHtml}</div>
+        <div class="feed-tabs" id="feedTabs">
+          <button data-ft="foryou" class="active">For you</button>
+          <button data-ft="following">Following</button>
+          <button data-ft="video">Video</button>
+        </div>
+      </section>
+      ${composerHtml}
+      <div id="feedList"></div>`;
+
+    // story circles open the existing viewer; "Your story" opens yours or the creator
+    el.querySelectorAll('[data-story]').forEach(btn => btn.onclick = () => Views.storyViewer(otherTrays[+btn.dataset.story], 0));
+    const ys = document.getElementById('yourStory');
+    if (ys) ys.onclick = () => {
+      if (!App.user) { Views.authModal(); return; }
+      if (ownTray) Views.storyViewer(ownTray, 0); else location.hash = '#/create';
+    };
+
+    /* ---- tabs ---- */
+    const list = document.getElementById('feedList');
+    let viewsCounted = false, lumsCache = null;
+    const withAds = (arr) => {
       const items = []; let seenReg = 0;
-      for (const p of posts) { items.push(p); if (!p.is_ad) { seenReg++; if (ADSTERRA_KEY && seenReg % 6 === 0) items.push({ _adSlot: 'network' }); } }
-      el.innerHTML = items.map(p => p._adSlot === 'network' ? netAdCard() : postCard(p)).join('');
-      mountNetAds(el);
-      // count views (fire-and-forget); AI views never count toward earnings (server-side)
-      posts.forEach(p => { if (!p.is_ad) API.post(`/posts/${p.id}/view`).catch(() => {}); });
-    } catch (e) { el.innerHTML = `<div class="card center">Couldn't load the feed. Try again.</div>`; }
+      for (const p of arr) { items.push(p); if (!p.is_ad) { seenReg++; if (ADSTERRA_KEY && seenReg % 6 === 0) items.push({ _adSlot: 'network' }); } }
+      return items.map(p => p._adSlot === 'network' ? netAdCard() : postCard(p)).join('');
+    };
+    const renderTab = async (tab) => {
+      el.querySelectorAll('#feedTabs button').forEach(b => b.classList.toggle('active', b.dataset.ft === tab));
+      if (tab === 'video') {
+        list.innerHTML = `<div class="card center"><div class="muted">Loading videos…</div></div>`;
+        try {
+          if (!lumsCache) { const d = await API.get('/lums'); lumsCache = d.lums || []; }
+          list.innerHTML = lumsCache.length ? lumsCache.map(lumCard).join('') : `<div class="card center muted">No videos yet — post one with the composer's Photo / video button. 🎬</div>`;
+        } catch (e) { list.innerHTML = `<div class="card center">Couldn't load videos.</div>`; }
+        return;
+      }
+      if (tab === 'following') {
+        if (!App.user) { list.innerHTML = `<div class="card center"><div class="muted">Log in to see posts from your friends.</div><div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div></div>`; return; }
+        const mine = posts.filter(p => !p.is_ad && (p.username === App.user.username || friendNames.has(p.username)));
+        list.innerHTML = mine.length ? mine.map(postCard).join('') : `<div class="card center muted">Nothing from your circle yet — when your friends post, it lands here. 👥</div>`;
+        return;
+      }
+      // For you — the full feed, house ads as delivered + network slot every ~6 posts
+      list.innerHTML = posts.length ? withAds(posts) : `<div class="card center">No posts yet — be the first! ✨</div>`;
+      mountNetAds(list);
+      if (!viewsCounted) {
+        viewsCounted = true;
+        // count views (fire-and-forget); AI views never count toward earnings (server-side)
+        posts.forEach(p => { if (!p.is_ad) API.post(`/posts/${p.id}/view`).catch(() => {}); });
+      }
+    };
+    el.querySelectorAll('#feedTabs button').forEach(b => b.onclick = () => renderTab(b.dataset.ft));
+    renderTab(Views._feedTab && ['following', 'video'].includes(Views._feedTab) ? Views._feedTab : 'foryou');
+    el.querySelectorAll('#feedTabs button').forEach(b => b.addEventListener('click', () => { Views._feedTab = b.dataset.ft; }));
+
+    /* ---- composer wiring ---- */
+    if (App.user) {
+      const fileIn = document.getElementById('cmpFile');
+      const meta = document.getElementById('cmpMeta');
+      let feeling = '';
+      document.getElementById('cmpMediaBtn').onclick = () => fileIn.click();
+      fileIn.onchange = () => {
+        const f = fileIn.files[0];
+        if (!f) { meta.style.display = 'none'; meta.textContent = ''; return; }
+        meta.style.display = '';
+        meta.textContent = f.type.startsWith('video/')
+          ? `🎬 ${f.name} — videos post as a Lum`
+          : `🖼 ${f.name} — attached to your post`;
+      };
+      const feelRow = document.getElementById('cmpFeelRow');
+      const FEELINGS = [['😊', 'happy'], ['🥰', 'loved'], ['🔥', 'fired up'], ['✨', 'inspired'], ['😴', 'sleepy'], ['😎', 'cool']];
+      feelRow.innerHTML = FEELINGS.map(([e, l]) => `<button class="feel-btn" data-feel="${e}|${l}">${e} ${l}</button>`).join('');
+      document.getElementById('cmpFeelBtn').onclick = () => feelRow.classList.toggle('open');
+      feelRow.querySelectorAll('[data-feel]').forEach(b => b.onclick = () => {
+        const [e, l] = b.dataset.feel.split('|');
+        feeling = ` — feeling ${e} ${l}`;
+        meta.style.display = '';
+        meta.textContent = `Feeling ${e} ${l}`;
+        feelRow.classList.remove('open');
+      });
+      document.getElementById('cmpPost').onclick = async () => {
+        const btn = document.getElementById('cmpPost');
+        const text = document.getElementById('cmpText').value.trim();
+        const f = fileIn.files[0];
+        if (!text && !f) { toast('Write something or add a photo/video first ✦'); return; }
+        btn.disabled = true; btn.textContent = 'Posting…';
+        try {
+          if (f && f.type.startsWith('video/')) {
+            const fd = new FormData();
+            fd.append('caption', (text + feeling).trim());
+            fd.append('video', f);
+            await API.upload('/lums', fd);
+            toast('Lum posted! 🎬'); App.checkMilestones();
+            location.hash = '#/lums';
+            return;
+          }
+          const fd = new FormData();
+          fd.append('content', (text + feeling).trim());
+          if (f) fd.append('image', f);
+          await API.upload('/posts', fd);
+          toast('Posted! ✦'); App.checkMilestones();
+          Views.feed(el);
+        } catch (e) { toast(e.data?.error || 'Could not post'); btn.disabled = false; btn.textContent = '＋ Post'; }
+      };
+    }
   },
 
   /* ---------------- STORIES ---------------- */
@@ -1183,7 +1467,7 @@ const Views = {
             <div class="muted">@${esc(u.username)}</div>
             ${u.is_developer ? `<div class="dev-title">👨‍💻 Founder &amp; Developer of Luminous</div>` : ''}
             <div class="mt">${badgesHtml(u)}</div></div>
-          ${isOwn ? `<a class="btn small ghost" href="#/settings">Edit</a>` : ''}
+          ${isOwn ? `<span class="row"><a class="btn small ghost" href="#/appearance">✦ Appearance</a><a class="btn small ghost" href="#/settings">Edit</a></span>` : ''}
         </div>
         <div class="mt"><span class="status-dot" style="background:${statusColor}"></span><span class="muted">${esc(u.status)}</span>
           ${u.public_age ? ` · <span class="muted">${u.public_age} yrs old</span>` : ''}</div>
@@ -1197,7 +1481,8 @@ const Views = {
         <button data-t="lums" class="${tab === 'lums' ? 'active' : ''}">Lums</button>
         <button data-t="milestones" class="${tab === 'milestones' ? 'active' : ''}">Milestones</button>
       </div>
-      <div id="ptab"></div>`;
+      <div id="ptab"></div>
+      <div class="brand-foot">✦ <b>LUMINOUS</b> · Built for creativity, connection, and growth.</div>`;
     el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { App._profileTab = b.dataset.t; Views.profile(el, username); });
     const ptab = document.getElementById('ptab');
     if (tab === 'posts') ptab.innerHTML = posts.length ? posts.map(postCard).join('') : `<div class="card center muted">No posts yet.</div>`;
@@ -1360,6 +1645,159 @@ const Views = {
     };
     el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => show(b.dataset.t));
     show('post');
+  },
+
+  /* ---------------- MORE MENU (header ☰) ---------------- */
+  moreMenu() {
+    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    const item = (href, icon, label) => `<a href="${href}" onclick="closeModal()"><span class="mi">${icon}</span>${label}</a>`;
+    openModal(`<div class="row"><span class="logo-tile" style="width:38px;height:38px;font-size:19px;border-radius:12px">✦</span>
+        <h3 style="margin:0" class="grow">LUMINOUS</h3>
+        <button class="icon-btn" onclick="closeModal()" aria-label="Close">✕</button></div>
+      <div class="more-list mt">
+        ${item('#/stories', '📖', 'Stories')}
+        ${item('#/lums', '🎬', 'Lums')}
+        ${item('#/friends', '👥', 'Friends & Messages')}
+        ${item('#/mentors', '💫', 'AI Mentors')}
+        ${item('#/companions', '🪄', 'AI Companions')}
+        ${item('#/wallet', '👛', 'Wallet')}
+        ${item('#/appearance', '✦', 'Customize appearance')}
+        ${App.user ? item('#/settings', '⚙️', 'Settings') : ''}
+        ${App.user && App.user.is_developer ? item('#/admin', '🛠️', 'Admin') : ''}
+        <button id="mmTheme"><span class="mi">${theme === 'dark' ? '☀️' : '🌙'}</span>${theme === 'dark' ? 'Light mode' : 'Dark mystery mode'}</button>
+        ${App.user
+          ? `<button id="mmLogout"><span class="mi">🚪</span>Log out</button>`
+          : `<button id="mmLogin"><span class="mi">🔑</span>Log in / Sign up</button>`}
+      </div>
+      <div class="brand-foot">✦ <b>LUMINOUS</b> · Built for creativity, connection, and growth.</div>`);
+    document.getElementById('mmTheme').onclick = () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('luminous_theme', next);
+      Views.moreMenu();
+    };
+    const login = document.getElementById('mmLogin');
+    if (login) login.onclick = () => { closeModal(); Views.authModal(); };
+    const logout = document.getElementById('mmLogout');
+    if (logout) logout.onclick = async () => {
+      try { await API.post('/auth/logout', {}); } catch (e) { /* ignore */ }
+      API.setToken(null); App.user = null; closeModal(); App.refreshAuth(); App.route();
+      toast('Logged out — see you soon ✦');
+    };
+  },
+
+  /* ---------------- APPEARANCE (✦ Customize appearance) ---------------- */
+  async appearance(el) {
+    let screen = 'home';
+    let pending = Appearance.load(screen) || Appearance.DEFAULT();
+    const ACCENT = () => Appearance.accent();
+    el.innerHTML = `
+      <div class="card">
+        <h2 style="margin:0 0 8px">✦ Section appearance</h2>
+        <div class="muted" style="font-size:14px;line-height:1.55">Choose a different background for each part of Luminous. Changes are saved in this browser on this device.</div>
+        <div class="form-grid mt">
+          <label class="f">Choose a screen
+            <select id="apScreen">${Appearance.SCREENS.map(s => `<option value="${s.key}">${s.label}</option>`).join('')}</select></label>
+          <label class="f">Background type
+            <select id="apType">
+              <option value="photo">Personal photo</option>
+              <option value="solid">Solid color</option>
+              <option value="gradient">Gradient</option>
+            </select></label>
+          <div class="ap-type-box" id="apTypeBox"></div>
+          <label class="f">Dark overlay <span id="apOverlayVal"></span>
+            <input type="range" id="apOverlay" min="0" max="90" step="1"></label>
+          <label class="f">Live preview</label>
+          <div class="ap-preview" id="apPreview"><span>Live preview</span></div>
+          <label class="f">Accent color — buttons, rings & highlights</label>
+          <div class="swatches" id="apAccents"></div>
+          <button class="btn" id="apSave" style="justify-self:start;padding:14px 28px;font-size:16.5px">Save this screen</button>
+          <button class="btn pill-outline" id="apReset" style="justify-self:start">Reset this screen</button>
+          <button class="btn pill-outline" id="apResetAll" style="justify-self:start">Reset all screens</button>
+          <div class="muted" style="font-size:14px">✦ Choose a screen and customize its background.</div>
+        </div>
+      </div>`;
+
+    const $ = (id) => document.getElementById(id);
+    const typeBox = $('apTypeBox'), preview = $('apPreview'), overlayIn = $('apOverlay');
+
+    const drawPreview = () => {
+      if (pending.type === 'photo' && pending.photo) {
+        preview.style.background = '';
+        preview.style.backgroundImage = `url("${pending.photo}")`;
+        preview.style.backgroundSize = 'cover'; preview.style.backgroundPosition = 'center';
+      } else {
+        preview.style.backgroundImage = '';
+        preview.style.background = Appearance.cssFor(pending);
+      }
+      preview.style.boxShadow = `inset 0 0 0 999px rgba(5,2,12,${(pending.overlay || 0) / 100})`;
+      $('apOverlayVal').textContent = `${pending.overlay}%`;
+      overlayIn.value = pending.overlay;
+    };
+    const drawTypeBox = () => {
+      $('apType').value = pending.type;
+      if (pending.type === 'photo') {
+        typeBox.innerHTML = `<label class="f">Choose a photo from your device
+            <input type="file" id="apFile" accept="image/*"></label>
+          <div class="muted">Choose a photo from your phone gallery or computer. Images are resized before saving.</div>
+          <div class="muted" id="apPhotoState">${pending.photo ? 'A photo is set for this screen — pick a new one to replace it.' : 'No photo set yet for this screen.'}</div>`;
+        $('apFile').onchange = async () => {
+          const f = $('apFile').files[0];
+          if (!f) return;
+          try {
+            pending.photo = await Appearance.downscalePhoto(f);
+            $('apPhotoState').textContent = 'Photo ready — check the live preview, then Save this screen.';
+            drawPreview();
+          } catch (e) { toast('That image could not be read'); }
+        };
+      } else if (pending.type === 'solid') {
+        typeBox.innerHTML = `<label class="f">Preset colors</label>
+          <div class="swatches">${Appearance.SOLIDS.map(c => `<button class="swatch${pending.color === c ? ' sel' : ''}" data-color="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>
+          <label class="f">…or any color<input type="color" id="apColor" value="${esc(pending.color || '#150b26')}" style="height:46px"></label>`;
+        typeBox.querySelectorAll('[data-color]').forEach(b => b.onclick = () => { pending.color = b.dataset.color; drawTypeBox(); drawPreview(); });
+        $('apColor').oninput = () => { pending.color = $('apColor').value; drawPreview(); };
+        $('apColor').onchange = drawTypeBox;
+      } else {
+        typeBox.innerHTML = `<label class="f">Mystery gradients</label>
+          <div class="grad-presets">${Appearance.GRADIENTS.map((g, i) => `<button class="grad-preset${pending.gradient === i ? ' sel' : ''}" data-grad="${i}" style="background:${g.css}" title="${esc(g.name)}" aria-label="${esc(g.name)}"></button>`).join('')}</div>
+          <div class="muted" id="apGradName">${esc((Appearance.GRADIENTS[pending.gradient || 0] || {}).name || '')}</div>`;
+        typeBox.querySelectorAll('[data-grad]').forEach(b => b.onclick = () => {
+          pending.gradient = +b.dataset.grad; drawTypeBox(); drawPreview();
+        });
+      }
+    };
+    const drawAccents = () => {
+      $('apAccents').innerHTML = Appearance.ACCENTS.map(a =>
+        `<button class="swatch${ACCENT() === a.value ? ' sel' : ''}" data-accent="${a.value}" style="background:${a.value}" title="${esc(a.name)}" aria-label="${esc(a.name)}"></button>`).join('');
+      $('apAccents').querySelectorAll('[data-accent]').forEach(b => b.onclick = () => {
+        Appearance.setAccent(b.dataset.accent);
+        drawAccents();
+        toast('Accent updated ✦');
+      });
+    };
+    const loadScreen = (key) => {
+      screen = key;
+      pending = Appearance.load(screen) || Appearance.DEFAULT();
+      drawTypeBox(); drawPreview();
+    };
+
+    $('apScreen').onchange = () => loadScreen($('apScreen').value);
+    $('apType').onchange = () => { pending.type = $('apType').value; drawTypeBox(); drawPreview(); };
+    overlayIn.oninput = () => { pending.overlay = +overlayIn.value; drawPreview(); };
+    $('apSave').onclick = () => {
+      if (pending.type === 'photo' && !pending.photo) { toast('Pick a photo first — or switch the background type'); return; }
+      if (Appearance.save(screen, pending)) {
+        toast(`Saved — ${esc(Appearance.SCREENS.find(s => s.key === screen).label)} background updated ✦`);
+        if (Appearance.screenForHash(location.hash || '#/') === screen) Appearance.applyForScreen(screen);
+      } else {
+        toast('Could not save — the photo may be too large for this browser');
+      }
+    };
+    $('apReset').onclick = () => { Appearance.reset(screen); loadScreen(screen); toast('Screen reset to the mystery theme'); };
+    $('apResetAll').onclick = () => { Appearance.resetAll(); loadScreen(screen); Appearance.applyForHash(location.hash || '#/'); toast('All screens reset'); };
+
+    drawAccents();
+    loadScreen('home');
   },
 
   /* ---------------- ADMIN (developer only) ---------------- */
