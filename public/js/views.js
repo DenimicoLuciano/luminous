@@ -1661,6 +1661,7 @@ const Views = {
         ${item('#/mentors', '💫', 'AI Mentors')}
         ${item('#/companions', '🪄', 'AI Companions')}
         ${item('#/wallet', '👛', 'Wallet')}
+        <a href="https://muse.ai/s/lumiads-qxs6exenbxdgxwxi/W9lB2q9kRmrNpisoDNRkXdSmpbmOtKiZpN8J6BQKAeI" target="_blank" rel="noopener" onclick="closeModal()"><span class="mi">📣</span>LumiAds · Advertise here</a>
         ${item('#/appearance', '✦', 'Customize appearance')}
         ${App.user ? item('#/settings', '⚙️', 'Settings') : ''}
         ${App.user && App.user.is_developer ? item('#/admin', '🛠️', 'Admin') : ''}
