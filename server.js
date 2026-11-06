@@ -193,6 +193,55 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ token, user: publicUser(getUserById.get(u.id)) });
 });
 
+// Sign in with Lumiail (Lumiworld single sign-on): the Lumiail password is
+// verified by the Lumiail service itself and is never stored by Luminous.
+// First Lumiail sign-in creates a linked Luminous account automatically.
+app.post('/api/auth/lumiail', async (req, res) => {
+  const addr = String((req.body || {}).address || '').trim().toLowerCase();
+  const password = (req.body || {}).password || '';
+  if (!addr || !password) return res.status(400).json({ error: 'Enter your Lumiail address and password' });
+  const base = (process.env.LUMIAIL_URL || 'https://lumiail.onrender.com').replace(/\/+$/, '');
+  let prof = null;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    const r = await fetch(base + '/api/sso/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(process.env.SSO_SECRET ? { 'x-sso-secret': process.env.SSO_SECRET } : {}) },
+      body: JSON.stringify({ address: addr, password }),
+      signal: ctl.signal,
+    });
+    clearTimeout(timer);
+    if (r.status === 401) return res.status(401).json({ error: 'Invalid Lumiail address or password' });
+    if (!r.ok) return res.status(502).json({ error: 'Lumiail sign-in is not available yet — it launches soon' });
+    prof = await r.json();
+  } catch (e) {
+    return res.status(502).json({ error: 'Lumiail sign-in is not available yet — it launches soon' });
+  }
+  if (!prof || !prof.ok || !prof.username) return res.status(401).json({ error: 'Invalid Lumiail address or password' });
+  let u = db.prepare('SELECT * FROM users WHERE lumiail_address = ?').get(addr);
+  if (!u) {
+    const byEmail = getUserByEmail.get(addr);
+    if (byEmail) {
+      db.prepare('UPDATE users SET lumiail_address = ? WHERE id = ?').run(addr, byEmail.id);
+      u = getUserById.get(byEmail.id);
+    }
+  }
+  if (!u) {
+    let base2 = String(prof.username).toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 24) || 'lumiailuser';
+    let uname = base2, n = 1;
+    while (db.prepare('SELECT 1 FROM users WHERE username = ?').get(uname)) { n += 1; uname = base2.slice(0, 20) + n; }
+    const r2 = db.prepare(`INSERT INTO users (email, password_hash, username, display_name, account_type, role, lumiail_address)
+      VALUES (?,?,?,?,?,?,?)`).run(addr, '!', uname, String(prof.display_name || base2).slice(0, 60), 'personal', 'user', addr);
+    ensureWallet(r2.lastInsertRowid);
+    u = getUserById.get(r2.lastInsertRowid);
+  }
+  ensureDeveloperRole(u);
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare('INSERT INTO sessions (token, user_id) VALUES (?,?)').run(token, u.id);
+  res.json({ token, user: publicUser(getUserById.get(u.id)) });
+});
+
 app.post('/api/auth/logout', authRequired, (req, res) => {
   const h = req.headers.authorization;
   db.prepare('DELETE FROM sessions WHERE token = ?').run(h.slice(7));
