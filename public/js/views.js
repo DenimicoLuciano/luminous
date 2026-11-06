@@ -2072,7 +2072,7 @@ const Views = {
         <div class="auth-or"><span>or</span></div>
         <button type="button" class="btn ghost" id="aLumiail">✉️ Sign in with Lumiail</button>
         <div class="hidden" id="lumiailBox">
-          <label class="f">Lumiail address<input id="lAddr" type="email" placeholder="you@lumiail.com"></label>
+          <label class="f">Lumiail address<input id="lAddr" type="email" placeholder="you@lumiail.ca"></label>
           <label class="f">Lumiail password<input id="lPass" type="password"></label>
           <button type="button" class="btn" id="lGo">Continue with Lumiail</button>
           <div class="muted">Your Lumiail password is checked by Lumiail itself — Luminous never stores it. First sign-in creates your linked Luminous account automatically.</div>
