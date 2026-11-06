@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
+const lumicoin = require('./lumicoin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,8 +32,21 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 // ---------- helpers ----------
 const AI_CONFIGURED = () => !!process.env.OPENAI_API_KEY;
 
-async function callAI(system, messages) {
-  if (!AI_CONFIGURED()) return null;
+// ---------- AI call path (shared by mentors + companions) ----------
+// Speed rules: only the last AI_CONTEXT_LIMIT stored messages are SENT per
+// call (stored history itself is never trimmed), each surface caps its own
+// output tokens, and a provider overload (503 / "high demand") is retried
+// ONCE with a halved context before the error surfaces.
+const AI_CONTEXT_LIMIT = 40;
+const AI_RETRY_CONTEXT = 16;
+
+function isOverloadError(e) {
+  if (!e) return false;
+  if (e.status === 503) return true;
+  return /high demand|overloaded|503/i.test(e.message || '');
+}
+
+async function callAIOnce(system, messages, { maxTokens, contextLimit, stream, onToken }) {
   const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
   const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const res = await fetch(`${base}/chat/completions`, {
@@ -43,17 +57,116 @@ async function callAI(system, messages) {
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: 'system', content: system }, ...messages.slice(-300)],
-      max_tokens: 400,
+      messages: [{ role: 'system', content: system }, ...messages.slice(-contextLimit)],
+      max_tokens: maxTokens,
       temperature: 0.8,
+      ...(stream ? { stream: true } : {}),
     }),
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error(`AI provider error ${res.status}: ${t.slice(0, 200)}`);
+    const err = new Error(`AI provider error ${res.status}: ${t.slice(0, 200)}`);
+    err.status = res.status;
+    throw err;
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim() || null;
+  if (!stream) {
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  }
+  // Streaming: a provider that ignores stream:true and answers plain JSON
+  // is handled as a normal completion (no tokens are emitted).
+  const ctype = res.headers.get('content-type') || '';
+  if (!ctype.includes('text/event-stream')) {
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  }
+  let full = '';
+  let buf = '';
+  const decoder = new TextDecoder();
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const j = JSON.parse(payload);
+        const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.message?.content || '';
+        if (delta) { full += delta; if (onToken) onToken(delta); }
+      } catch { /* ignore keep-alive / partial lines */ }
+    }
+  }
+  return full.trim() || null;
+}
+
+// callAI(system, messages, { maxTokens, stream, onToken }) → reply text or
+// null (null = AI not configured). Throws on provider errors, after the
+// single overload retry. In stream mode onToken fires per token; the retry
+// only happens when no token has been emitted yet, so a client never sees
+// a duplicated half-reply.
+async function callAI(system, messages, opts = {}) {
+  if (!AI_CONFIGURED()) return null;
+  const maxTokens = opts.maxTokens || 400;
+  let tokensEmitted = 0;
+  const onToken = opts.onToken ? (t) => { tokensEmitted++; opts.onToken(t); } : undefined;
+  const attempt = (limit) => callAIOnce(system, messages, {
+    maxTokens, contextLimit: limit, stream: !!opts.stream, onToken,
+  });
+  try {
+    return await attempt(AI_CONTEXT_LIMIT);
+  } catch (e) {
+    if (isOverloadError(e) && tokensEmitted === 0) {
+      return await attempt(AI_RETRY_CONTEXT);
+    }
+    throw e;
+  }
+}
+
+// Chat-endpoint helper implementing the streaming design: the client opts
+// in by sending { stream: true } in the POST body. The response then
+// becomes text/event-stream — `event: token` frames {"content": "..."}
+// per token, and the caller finishes with an `event: done` frame once the
+// full reply is saved. If the provider errors before the first token, we
+// fall back to the plain non-streaming call and the caller answers with
+// the usual JSON body. Returns { reply } for the JSON path or
+// { streamed: true, reply, failed? } when SSE was used.
+async function aiChatReply(req, res, system, history, maxTokens) {
+  if (!AI_CONFIGURED()) return { reply: null };
+  if (!(req.body && req.body.stream)) {
+    return { reply: await callAI(system, history, { maxTokens }) };
+  }
+  let sent = false;
+  const onToken = (t) => {
+    if (!sent) {
+      sent = true;
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+    }
+    res.write(`event: token\ndata: ${JSON.stringify({ content: t })}\n\n`);
+  };
+  try {
+    const reply = await callAI(system, history, { maxTokens, stream: true, onToken });
+    if (!sent) return { reply }; // provider answered without streaming: JSON path
+    return { streamed: true, reply };
+  } catch (e) {
+    if (!sent) {
+      // Provider errored before the first token: fall back to the
+      // existing non-streaming JSON path.
+      return { reply: await callAI(system, history, { maxTokens }) };
+    }
+    // Mid-stream failure: tell the client and stop; nothing is saved.
+    res.write(`event: error\ndata: ${JSON.stringify({ error: 'AI_ERROR', message: e.message })}\n\n`);
+    return { streamed: true, reply: null, failed: true };
+  }
 }
 
 const LEVEL_XP = (n) => 100 * (n - 1) * (n - 1); // xp needed for level n
@@ -510,15 +623,27 @@ app.post('/api/mentors/:key/chat', authRequired, async (req, res) => {
     const conv = getOrCreateConversation(req.user.id, 'mentor', mentor.id);
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
       .run(conv.id, 'user', message.slice(0, 2000));
-    const history = db.prepare('SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 20')
+    const history = db.prepare('SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 40')
       .all(conv.id).reverse();
-    const reply = await callAI(mentor.system_prompt, history);
+    const out = await aiChatReply(req, res, mentor.system_prompt, history, 800);
+    if (out.streamed) {
+      if (out.reply) {
+        db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
+          .run(conv.id, 'assistant', out.reply);
+        addXp(req.user.id, 2);
+        res.write(`event: done\ndata: ${JSON.stringify({ aiConfigured: true, reply: out.reply })}\n\n`);
+      }
+      res.end();
+      return;
+    }
+    const reply = out.reply;
     if (reply == null) return res.json({ aiConfigured: false, reply: null });
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
       .run(conv.id, 'assistant', reply);
     addXp(req.user.id, 2);
     res.json({ aiConfigured: true, reply });
   } catch (e) {
+    if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return; }
     res.status(502).json({ error: 'AI_ERROR', message: e.message });
   }
 });
@@ -590,15 +715,27 @@ app.post('/api/companions/:id/chat', authRequired, async (req, res) => {
     const conv = getOrCreateConversation(req.user.id, 'companion', c.id);
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
       .run(conv.id, 'user', message.slice(0, 2000));
-    const history = db.prepare('SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 20')
+    const history = db.prepare('SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 40')
       .all(conv.id).reverse();
-    const reply = await callAI(companionSystemPrompt(c), history);
+    const out = await aiChatReply(req, res, companionSystemPrompt(c), history, 700);
+    if (out.streamed) {
+      if (out.reply) {
+        db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
+          .run(conv.id, 'assistant', out.reply);
+        addXp(req.user.id, 2);
+        res.write(`event: done\ndata: ${JSON.stringify({ aiConfigured: true, reply: out.reply })}\n\n`);
+      }
+      res.end();
+      return;
+    }
+    const reply = out.reply;
     if (reply == null) return res.json({ aiConfigured: false, reply: null });
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)')
       .run(conv.id, 'assistant', reply);
     addXp(req.user.id, 2);
     res.json({ aiConfigured: true, reply });
   } catch (e) {
+    if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return; }
     res.status(502).json({ error: 'AI_ERROR', message: e.message });
   }
 });
@@ -736,17 +873,51 @@ app.post('/api/live/:id/watch', authRequired, (req, res) => {
 });
 
 // coin gift: transfer from giver wallet to stream
-app.post('/api/live/:id/gift', authRequired, (req, res) => {
+app.post('/api/live/:id/gift', authRequired, async (req, res) => {
   const s = liveActive(req.params.id);
   if (!s) return res.status(404).json({ error: 'Stream not live' });
   const coins = Math.max(1, Math.min(10000, parseInt(req.body.coins) || 0));
   ensureWallet(req.user.id);
+  const note = (req.body.note || '').slice(0, 60);
+  // Unified ledger path: when Core is enabled and BOTH giver and host are
+  // Lumiail-linked, the gift is a Core purchase (giver → host) and the local
+  // wallet is not touched. Any Core failure falls back to the local debit.
+  const host = getUserById.get(s.user_id);
+  if (lumicoin.enabled() && req.user.lumiail_address && host && host.lumiail_address) {
+    const coreWallet = await lumicoin.getWallet(req.user.lumiail_address);
+    if (coreWallet) {
+      if ((coreWallet.available ?? coreWallet.balance) < coins)
+        return res.status(400).json({ error: 'Not enough coins' });
+      addStreamCoins(s.id, coins);
+      const ev = db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,?,?)')
+        .run(s.id, req.user.id, 'gift', coins, note);
+      const purchase = await lumicoin.postPurchase({
+        from_address: req.user.lumiail_address,
+        to_address: host.lumiail_address,
+        amount: coins,
+        note: note || 'Luminous live gift',
+        idempotency_key: `gift-${ev.lastInsertRowid}`,
+      });
+      if (purchase) return res.json({ ok: true, coins });
+      // Core transfer failed after the event was recorded: fall back to the
+      // local debit if it can cover the gift; otherwise roll the event and
+      // the stream accounting back so nothing is recorded as unpaid.
+      const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
+      if (w.coins >= coins) {
+        db.prepare('UPDATE wallets SET coins = coins - ? WHERE user_id = ?').run(coins, req.user.id);
+        return res.json({ ok: true, coins });
+      }
+      db.prepare('DELETE FROM live_events WHERE id = ?').run(ev.lastInsertRowid);
+      addStreamCoins(s.id, -coins);
+      return res.status(400).json({ error: 'Not enough coins' });
+    }
+  }
   const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
   if (w.coins < coins) return res.status(400).json({ error: 'Not enough coins' });
   db.prepare('UPDATE wallets SET coins = coins - ? WHERE user_id = ?').run(coins, req.user.id);
   addStreamCoins(s.id, coins);
   db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,?,?)')
-    .run(s.id, req.user.id, 'gift', coins, (req.body.note || '').slice(0, 60));
+    .run(s.id, req.user.id, 'gift', coins, note);
   res.json({ ok: true, coins });
 });
 
@@ -765,28 +936,53 @@ app.post('/api/live/:id/free-gift', authRequired, (req, res) => {
   res.json({ ok: true, coins: 1 });
 });
 
+// Host payout credit: unified-ledger first — when Core is enabled and the
+// host is Lumiail-linked, the payout is a Core 'earn' (idempotent per
+// stream + payout kind) and the local wallet is NOT credited. On any Core
+// failure the local wallet is credited instead. The two are mutually
+// exclusive per payout: a host is never paid twice. Returns the balance
+// to use for milestone checks (Core balance or local), or null.
+async function creditHostPayout(user, streamId, amount, kind, keySuffix) {
+  if (amount > 0 && lumicoin.enabled() && user.lumiail_address) {
+    const r = await lumicoin.postTransaction({
+      lumiail_address: user.lumiail_address,
+      kind: 'earn',
+      amount,
+      note: kind === 'withdraw' ? 'Luminous live withdraw' : 'Luminous live end payout',
+      idempotency_key: keySuffix || `stream-${streamId}-${kind}`,
+    });
+    if (r) return r.wallet ? r.wallet.balance : null;
+  }
+  db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(amount, user.id);
+  const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(user.id);
+  return w ? w.coins : null;
+}
+
 // host withdrawal at 1,000 coins (stream keeps going)
-app.post('/api/live/:id/withdraw', authRequired, (req, res) => {
+app.post('/api/live/:id/withdraw', authRequired, async (req, res) => {
   const s = liveActive(req.params.id);
   if (!s || s.user_id !== req.user.id) return res.status(403).json({ error: 'Only the host can withdraw' });
   if (s.coins_earned < 1000) return res.status(400).json({ error: 'Need at least 1,000 coins to withdraw' });
   ensureWallet(req.user.id);
-  db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(s.coins_earned, req.user.id);
+  // Each withdraw on this stream is its OWN payout: bump the per-stream
+  // payout sequence first so the Core idempotency key is unique per payout
+  // (a second withdraw must never be mistaken for a replay of the first).
+  db.prepare('UPDATE live_streams SET payout_count = payout_count + 1 WHERE id = ?').run(s.id);
+  const prow = db.prepare('SELECT payout_count FROM live_streams WHERE id = ?').get(s.id);
+  const balance = await creditHostPayout(req.user, s.id, s.coins_earned, 'withdraw', `stream-${s.id}-withdraw-${prow ? prow.payout_count : 1}`);
   db.prepare('UPDATE live_streams SET coins_earned = 0 WHERE id = ?').run(s.id);
-  const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
-  if (w.coins >= 100) unlockMilestone(req.user.id, 'coin-earner');
+  if (balance !== null && balance >= 100) unlockMilestone(req.user.id, 'coin-earner');
   res.json({ ok: true, withdrawn: s.coins_earned });
 });
 
-app.post('/api/live/:id/end', authRequired, (req, res) => {
+app.post('/api/live/:id/end', authRequired, async (req, res) => {
   const s = liveActive(req.params.id);
   if (!s || s.user_id !== req.user.id) return res.status(403).json({ error: 'Only the host can end the stream' });
   ensureWallet(req.user.id);
-  db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(s.coins_earned, req.user.id);
+  const balance = await creditHostPayout(req.user, s.id, s.coins_earned, 'end');
   db.prepare('UPDATE live_streams SET status = \'ended\', ended_at = datetime(\'now\') WHERE id = ?').run(s.id);
-  const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
   db.prepare("UPDATE live_participants SET status = 'left' WHERE stream_id = ?").run(s.id);
-  if (w.coins >= 100) unlockMilestone(req.user.id, 'coin-earner');
+  if (balance !== null && balance >= 100) unlockMilestone(req.user.id, 'coin-earner');
   res.json({ ok: true, earned: s.coins_earned });
 });
 
@@ -947,9 +1143,28 @@ app.get('/api/live/:id/signals', authRequired, (req, res) => {
 });
 
 // ---------- wallet & payouts ----------
-app.get('/api/wallet', authRequired, (req, res) => {
+app.get('/api/wallet', authRequired, async (req, res) => {
   ensureWallet(req.user.id);
-  const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+  let wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+  // Unified ledger: for Lumiail-linked users, the coin numbers come from
+  // LumiCoin Core (the same wallet every Lumiworld product reads). Local
+  // ad-earnings fields stay local. Any Core failure → local wallet as-is.
+  if (lumicoin.enabled() && req.user.lumiail_address) {
+    const core = await lumicoin.getWallet(req.user.lumiail_address);
+    if (core) {
+      wallet = {
+        ...wallet,
+        coins: core.balance,
+        balance: core.balance,
+        pending: core.pending,
+        available: core.available,
+        total_earned: core.total_earned,
+        total_spent: core.total_spent,
+        lumiail_address: core.lumiail_address,
+        source: 'lumicoin-core',
+      };
+    }
+  }
   const payouts = db.prepare('SELECT * FROM payouts WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(req.user.id);
   const canEarn = req.user.verified && ['business', 'creator'].includes(req.user.account_type);
   const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id) || null;
