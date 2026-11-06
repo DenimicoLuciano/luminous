@@ -3,16 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Luminous ✨</title>
+<title>Luminous ✦</title>
 <meta name="description" content="Luminous — your feed, your rules. Posts, Stories, Lums, live streams, AI mentors and companions.">
+<meta name="theme-color" content="#0d0716">
+<style>html,body{background:#0d0716}</style>
 <link rel="stylesheet" href="/css/styles.css">
 </head>
 <body>
+<div id="screenBg" aria-hidden="true"></div>
+<div id="screenShade" aria-hidden="true"></div>
+
 <header class="topbar">
-  <div class="logo">✨ Luminous</div>
+  <a class="brand" href="#/" aria-label="Luminous home">
+    <span class="logo-tile">✦</span>
+    <span class="logo-text">LUMINOUS</span>
+  </a>
   <div class="row">
-    <button class="icon-btn" id="themeToggle" title="Toggle light/dark mode">🌙</button>
     <span id="authArea"></span>
+    <button class="hdr-pill" id="moreBtn" title="More">☰ More</button>
   </div>
 </header>
 
