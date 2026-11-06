@@ -6,18 +6,15 @@ const App = {
   _profileTab: 'posts',
 
   async init() {
-    // theme
+    // theme (dark mystery by default; toggle lives in the ☰ More menu)
     const saved = localStorage.getItem('luminous_theme') || 'dark';
     document.documentElement.dataset.theme = saved;
-    document.getElementById('themeToggle').textContent = saved === 'dark' ? '🌙' : '☀️';
-    document.getElementById('themeToggle').onclick = () => {
-      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-      document.documentElement.dataset.theme = next;
-      localStorage.setItem('luminous_theme', next);
-      document.getElementById('themeToggle').textContent = next === 'dark' ? '🌙' : '☀️';
-    };
+    // saved accent color re-themes buttons/rings/highlights via CSS variables
+    if (typeof Appearance !== 'undefined') Appearance.initAccent();
 
     document.getElementById('fab').onclick = () => location.hash = '#/create';
+    const moreBtn = document.getElementById('moreBtn');
+    if (moreBtn) moreBtn.onclick = () => Views.moreMenu();
 
     if (API.token) await this.refreshAuth().catch(() => API.setToken(null));
     this.renderNav();
@@ -57,21 +54,24 @@ const App = {
   },
 
   renderNav() {
+    // Floating bottom nav (concept layout): Home · Discover · Create · LIVE · Profile.
+    // Everything else (Friends, Stories, Lums, Mentors, Companions, Wallet, Settings,
+    // Appearance, Admin) lives in the header's ☰ More menu.
     const items = [
-      ['#/', '🏠', 'Home'],
-      ['#/discover', '🔍', 'Discover'],
-      ['#/friends', '👥', 'Friends'],
-      ['#/stories', '📖', 'Stories'],
-      ['#/lums', '🎬', 'Lums'],
-      ['#/live', '🔴', 'Live'],
-      ['#/mentors', '💫', 'Mentors'],
-      ['#/wallet', '👛', 'Wallet'],
+      ['#/', '⌂', 'Home', ''],
+      ['#/discover', '🔍', 'Discover', ''],
+      ['#/create', '＋', 'Create', 'nav-create'],
+      ['#/live', '◎', 'LIVE', ''],
+      [this.user ? '#/profile/' + this.user.username : '#/profile', this.user ? (this.user.avatar_emoji || '●') : '●', 'Profile', ''],
     ];
-    if (this.user) items.push(['#/profile/' + this.user.username, '👤', 'Profile']);
-    if (this.user && this.user.is_developer) items.push(['#/admin', '🛠️', 'Admin']);
     const hash = location.hash || '#/';
-    document.getElementById('navpill').innerHTML = items.map(([h, e, l]) =>
-      `<a href="${h}" class="${hash === h || (h !== '#/' && hash.startsWith(h)) ? 'active' : ''}"><span class="e">${e}</span>${l}</a>`).join('');
+    const isActive = (h) => {
+      if (h === '#/') return hash === '#/' || hash === '#' || hash === '';
+      if (h === '#/profile' || h.startsWith('#/profile/')) return hash.startsWith('#/profile');
+      return hash === h || hash.startsWith(h + '/');
+    };
+    document.getElementById('navpill').innerHTML = items.map(([h, e, l, cls]) =>
+      `<a href="${h}" class="${cls}${isActive(h) ? ' active' : ''}"><span class="e">${e}</span>${l}</a>`).join('');
     document.getElementById('fab').classList.toggle('hidden', !this.user);
 
     const area = document.getElementById('authArea');
@@ -91,6 +91,8 @@ const App = {
     if (window._liveCleanup && !hash.startsWith('#/live/')) { try { window._liveCleanup(); } catch (e) {} window._liveCleanup = null; }
     this.renderNav();
     window.scrollTo(0, 0);
+    // per-screen custom background (Appearance feature, localStorage only)
+    if (typeof Appearance !== 'undefined') Appearance.applyForHash(hash);
     const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat'];
     if (!this.user && needAuth.some(p => hash === p || hash.startsWith(p + '/'))) {
       el.innerHTML = `<div class="card center"><h3>✨ Join Luminous</h3><div class="muted">Log in or create an account to use this feature.</div>
@@ -98,6 +100,12 @@ const App = {
       return;
     }
     if (hash === '#/' || hash === '#') Views.feed(el);
+    else if (hash === '#/appearance') Views.appearance(el);
+    else if (hash === '#/profile') {
+      if (this.user) { location.hash = '#/profile/' + this.user.username; return; }
+      el.innerHTML = `<div class="card center"><h3>✦ Your profile awaits</h3><div class="muted">Log in or create an account to see your profile.</div>
+        <div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div></div>`;
+    }
     else if (hash === '#/discover') Views.discover(el);
     else if (hash === '#/friends') Views.friends(el);
     else if (hash.startsWith('#/chat/')) Views.chat(el, hash.split('/')[2]);
