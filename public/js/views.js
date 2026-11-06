@@ -1262,7 +1262,14 @@ const Views = {
       box.innerHTML += `<div class="msg assistant" id="typing"><i>typing…</i></div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        const r = await API.post(`/mentors/${key}/chat`, { message: text }, 100000);
+        let firstToken = true;
+        const r = await API.streamPost(`/mentors/${key}/chat`, { message: text }, (tok) => {
+          const t = document.getElementById('typing');
+          if (!t) return;
+          if (firstToken) { t.textContent = ''; firstToken = false; }
+          t.textContent += tok;
+          box.scrollTop = box.scrollHeight;
+        });
         document.getElementById('typing')?.remove();
         if (r.aiConfigured) box.innerHTML += `<div class="msg assistant">${esc(r.reply)}</div>`;
         else box.innerHTML += `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
@@ -1366,7 +1373,14 @@ const Views = {
       box.innerHTML += `<div class="msg user">${esc(text)}</div><div class="msg assistant" id="typing"><i>typing…</i></div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        const r = await API.post(`/companions/${id}/chat`, { message: text }, 100000);
+        let firstToken = true;
+        const r = await API.streamPost(`/companions/${id}/chat`, { message: text }, (tok) => {
+          const t = document.getElementById('typing');
+          if (!t) return;
+          if (firstToken) { t.textContent = ''; firstToken = false; }
+          t.textContent += tok;
+          box.scrollTop = box.scrollHeight;
+        });
         document.getElementById('typing')?.remove();
         box.innerHTML += r.aiConfigured ? `<div class="msg assistant">${esc(r.reply)}</div>` : `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
       } catch (e) { document.getElementById('typing')?.remove(); if (e && e.name === 'AbortError') box.innerHTML += `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>`; }
