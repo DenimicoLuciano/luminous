@@ -158,6 +158,10 @@ select option { background: var(--bg2); color: var(--text); }
 .ad-card { border: 1px dashed var(--pink); }
 
 /* home stories row */
+.auth-or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0; }
+.auth-or::before, .auth-or::after { content: ''; flex: 1; height: 1px; background: rgba(216,180,254,.25); }
+#lumiailBox { display: grid; gap: 10px; }
+#lumiailBox.hidden { display: none; }
 .stories-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .stories-head h3 { margin: 0; font-size: 19px; }
 .add-story { color: var(--muted); font-weight: 700; font-size: 14.5px; }
