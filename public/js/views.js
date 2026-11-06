@@ -1738,9 +1738,10 @@ const Views = {
     const drawTypeBox = () => {
       $('apType').value = pending.type;
       if (pending.type === 'photo') {
-        typeBox.innerHTML = `<label class="f">Choose a photo from your device
-            <input type="file" id="apFile" accept="image/*"></label>
-          <div class="muted">Choose a photo from your phone gallery or computer. Images are resized before saving.</div>
+        typeBox.innerHTML = `<label class="f">Wallpaper photo</label>
+          <label class="ap-pick" for="apFile">🖼️ Choose from camera roll</label>
+          <input type="file" id="apFile" accept="image/*" class="hidden">
+          <div class="muted">Opens your camera roll / photo gallery — pick any picture to use as this screen's wallpaper. Images are resized before saving.</div>
           <div class="muted" id="apPhotoState">${pending.photo ? 'A photo is set for this screen — pick a new one to replace it.' : 'No photo set yet for this screen.'}</div>`;
         $('apFile').onchange = async () => {
           const f = $('apFile').files[0];
