@@ -425,7 +425,7 @@ const Views = {
     const storiesHtml = `
       <div class="story-item own"><button class="story-dot" id="yourStory" aria-label="Your story">
         <span class="story-ring2"><span>${App.user ? esc(App.user.avatar_emoji || '✦') : '✦'}</span></span>
-        <span class="story-plus">＋</span>${statusDot(null, true)}</button>
+        <span class="story-plus">＋</span></button>
         <div class="story-name">Your story</div></div>
       ${otherTrays.map(storyItem).join('')}`;
 
