@@ -267,6 +267,9 @@ const userCols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userCols.includes('role')) {
   db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
 }
+if (!userCols.includes('lumiail_address')) {
+  db.exec("ALTER TABLE users ADD COLUMN lumiail_address TEXT");
+}
 
 // ---- Milestones (11) ----
 const MILESTONES = [
