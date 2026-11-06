@@ -2069,6 +2069,14 @@ const Views = {
           <option value="personal">Personal</option><option value="business">Business</option><option value="creator">Content Creator</option></select></label>
         <button class="btn" id="aGo">Log in</button>
         <button type="button" class="btn small ghost" id="aForgot">Forgot password?</button>
+        <div class="auth-or"><span>or</span></div>
+        <button type="button" class="btn ghost" id="aLumiail">✉️ Sign in with Lumiail</button>
+        <div class="hidden" id="lumiailBox">
+          <label class="f">Lumiail address<input id="lAddr" type="email" placeholder="you@lumiail.com"></label>
+          <label class="f">Lumiail password<input id="lPass" type="password"></label>
+          <button type="button" class="btn" id="lGo">Continue with Lumiail</button>
+          <div class="muted">Your Lumiail password is checked by Lumiail itself — Luminous never stores it. First sign-in creates your linked Luminous account automatically.</div>
+        </div>
       </div>`);
     const passEye = document.getElementById('aPassEye');
     passEye.onclick = () => {
@@ -2091,6 +2099,23 @@ const Views = {
     document.getElementById('tabLogin').onclick = () => setMode('login');
     document.getElementById('tabReg').onclick = () => setMode('register');
     document.getElementById('aForgot').onclick = () => Views.forgotModal();
+    document.getElementById('aLumiail').onclick = () => {
+      document.getElementById('lumiailBox').classList.toggle('hidden');
+      const f = document.getElementById('lAddr'); if (f) f.focus();
+    };
+    document.getElementById('lGo').onclick = async () => {
+      try {
+        const r = await API.post('/auth/lumiail', {
+          address: document.getElementById('lAddr').value.trim(),
+          password: document.getElementById('lPass').value,
+        });
+        API.setToken(r.token, document.getElementById('aRemember').checked);
+        closeModal();
+        await App.refreshAuth();
+        toast(`Welcome, ${r.user.display_name}! ✨`);
+        App.route();
+      } catch (e) { toast(e.data?.error || 'Lumiail sign-in failed'); }
+    };
     document.getElementById('aGo').onclick = async () => {
       try {
         const email = document.getElementById('aEmail').value.trim();
