@@ -137,6 +137,156 @@ const CONTENT = {
       ],
     },
   },
+
+  '2026-12': {
+    mystery: {
+      title: 'The Christmas Express: A Yuletide Whodunit',
+      intro:
+        'December 1954. The Yuletide Limited — the Christmas Express — is twelve hours out ' +
+        'of Chicago and buried to its axles in a snowdrift outside the little town of Holly ' +
+        'Junction, and it will not move again till morning. Among its passengers: Anton Weiss, ' +
+        'a jewel courier travelling under a plain coat and a plainer name, carrying the Winter ' +
+        'Rose ruby in a leather case to a New York buyer who means to unveil it on Christmas ' +
+        'morning. At a quarter past nine, with the generator sputtering and the whole train sunk ' +
+        'into five minutes of candlelit dark, someone opened that case. The Winter Rose is ' +
+        'gone. In its place sits a red glass bauble, the kind that hangs on a Christmas tree. ' +
+        'Four travellers had the run of that darkened car. One of them is lying. You were only ' +
+        'trying to get home for Christmas — but tonight, you are the detective. Work the clues, ' +
+        'name the thief — and the reason why.',
+      suspects: [
+        {
+          name: 'Elias Vance',
+          role: 'The conductor',
+          blurb:
+            'Thirty-one Christmases on this line, and this run is his last — he retires at New ' +
+            'Year with a pension and a gold watch from the company. He carries the master key to ' +
+            'every compartment on the train, and he is not shy about saying so.',
+        },
+        {
+          name: 'Vivienne LaRoux',
+          role: 'The jazz singer',
+          blurb:
+            'Travelling with her trio to a Christmas Eve engagement in New York — all velvet ' +
+            'voice and sequins. When the train stalled she sang carols in the club car to keep ' +
+            'everyone calm, and made forty cold passengers forget the snow for a song or two.',
+        },
+        {
+          name: 'Harold Fenn',
+          role: 'The travelling salesman',
+          blurb:
+            'Sells for Fenn\u2019s Festive Novelties out of St. Louis: tinsel, baubles, glass ' +
+            'icicles — whole forests of Christmas cheer packed into four sample cases. He has ' +
+            'been showing his wares to anyone who will sit still since Chicago, and talking ' +
+            'twice as long.',
+        },
+        {
+          name: 'Clara Whitfield',
+          role: 'The schoolteacher',
+          blurb:
+            'A quiet schoolteacher from a farming town in Indiana, going home for Christmas ' +
+            'with a carpetbag, a book of carols, and a box of ornaments her pupils painted for ' +
+            'the classroom tree. She keeps to her compartment, knits, and speaks softly when ' +
+            'she speaks at all.',
+        },
+      ],
+      clues: [
+        'Clue 1 — The unmarked door: Weiss\u2019s compartment door was locked all evening, ' +
+          'and its lock shows not one scratch — no pick turned in it, and no key but his ' +
+          'own. But the sleeping cars on the Yuletide Limited are joined by connecting ' +
+          'doors between neighbouring compartments, and the porter\u2019s repair log, written ' +
+          'up before Chicago, records a broken latch: the connecting door into Weiss\u2019s ' +
+          'compartment, from the compartment adjoining his. The thief never walked the ' +
+          'corridor at all. They came from next door.',
+        'Clue 2 — The conductor\u2019s blackout: When the generator failed at a quarter past ' +
+          'nine, Conductor Vance was in the vestibule with the engineer and the fireman, up ' +
+          'to his elbows in the machinery — and all three men swear he never left it until ' +
+          'the lights came back. His master key hung on its chain round his neck the whole ' +
+          'while; the fireman remembers it swinging in the lamplight. And a man one run from ' +
+          'a pension and a gold watch does not throw away thirty-one years for one stone, ' +
+          'however bright.',
+        'Clue 3 — The song that never stopped: Vivienne LaRoux stood on the club car\u2019s ' +
+          'little stage and sang straight through the blackout — \u201CSilent Night\u201D by ' +
+          'candlelight, and two more carols after it. Forty passengers heard her, and the ' +
+          'steward, who stood beside the piano holding the candle, will swear she never left ' +
+          'the stage, let alone the car. Whatever hand opened Weiss\u2019s case, it was not ' +
+          'hers.',
+        'Clue 4 — The salesman\u2019s baubles: The false ruby is a red glass bauble — and ' +
+          'Harold Fenn sells baubles by the crate. It looks black for him, until the ' +
+          'railway\u2019s boarding inventory surfaces: his sample cases were counted piece by ' +
+          'piece at Chicago over a breakage claim, and the count tonight matches it exactly. ' +
+          'Not one bauble missing. Besides, every Fenn ornament is factory-stamped on its ' +
+          'cap — and the bauble in Weiss\u2019s case bears no stamp at all. What it bears is a ' +
+          'tiny gold star, painted by hand.',
+        'Clue 5 — The teacher\u2019s box, and a telegram: The berth chart puts the ' +
+          'compartment adjoining Weiss\u2019s — the one with the broken connecting latch — in ' +
+          'the name of Miss Clara Whitfield. In her carpetbag sits the box of ornaments her ' +
+          'pupils painted for the classroom tree, every one finished with a tiny gold star. ' +
+          'One slot in the box stands empty. And folded inside her book of carols is a ' +
+          'telegram she took at Holly Junction, an hour before the blackout: her family\u2019s ' +
+          'farm payment is months overdue, the bank files foreclosure on Christmas Day, and ' +
+          'the debt must be paid in full or the farm is gone. She wired back one line: ' +
+          '\u201CEXPECT FUNDS BY CHRISTMAS.\u201D The porter, passing at half past nine, saw ' +
+          'her door ajar and Miss Whitfield awake, dressed, and reading — though she told ' +
+          'you she slept from dinner till morning.',
+      ],
+      // SERVER-SIDE ONLY — never copied into the DB payload or any response.
+      solution: {
+        suspectAnyTokens: ['clara', 'whitfield'],
+        motiveAllTokens: ['debt'],
+      },
+    },
+
+    treasure: {
+      title: 'The Star of the North',
+      intro:
+        'Every December a star rises over Luminous that no chart has ever mapped — the Star ' +
+        'of the North. It does not shine on treasure chests or thrones; it shines on whoever ' +
+        'goes looking for it. Four whispers guard its law, chained across the hidden ' +
+        'places — the Vault, the Library, the Back Room, and the Hall — and this year every ' +
+        'one of them is dusted with snow. Follow the whispers, speak the Star\u2019s law ' +
+        'aloud, and your name is engraved in the Hall of Fame forever.',
+      steps: [
+        {
+          place: 'The Vault',
+          riddle:
+            'Whisper the First: \u201CI am the room where the year is locked away — every ' +
+            'secret of the season sealed under starlight and frost. But the Star\u2019s law is ' +
+            'not kept here. It sleeps where the snow never falls indoors: a room of endless ' +
+            'pages, where the lamps burn past midnight and every story ever told keeps warm. ' +
+            'Name that room.\u201D',
+          anyTokens: ['midnight library'],
+        },
+        {
+          place: 'The Midnight Library',
+          riddle:
+            'Whisper the Second: \u201CAmong these shelves, a merrier voice: beyond the snow ' +
+            'and the hush there is a door no map has ever drawn, where dice hum and joysticks ' +
+            'glow like hearthfires, and your own face grins back at you from across the room. ' +
+            'Name that room.\u201D',
+          anyTokens: ['back room'],
+        },
+        {
+          place: 'The Back Room',
+          riddle:
+            'Whisper the Third: \u201CBehind the arcade glow, a softer voice: gold remembers ' +
+            'every name that earned it. There is a hall where the year\u2019s legends hang in ' +
+            'candlelight, and the Star of the North is carved above its door. Name that ' +
+            'hall.\u201D',
+          anyTokens: ['hall of fame'],
+        },
+        {
+          place: 'The Hall of Fame',
+          riddle:
+            'Whisper the Last: \u201CYou stand where legends hang — and the Star hangs with ' +
+            'them. Its law is short enough to carve on a seed packet and bright enough to ' +
+            'steer a ship home: a star does not wander the sky looking for somewhere to ' +
+            'shine, and a seed does not choose the soil it wakes in. Each one simply burns ' +
+            'where it was set. Speak the law in five words.\u201D',
+          allTokens: ['shine', 'where', 'you', 'are', 'planted'],
+        },
+      ],
+    },
+  },
 };
 
 // Client-safe payload stored in the events table: story material only.
