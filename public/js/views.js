@@ -209,15 +209,31 @@ function tierChip(t) {
   if (!t) return '';
   return `<span class="tier-chip tier-${t.key}">${t.emoji} ${t.label}</span>`;
 }
+const PRESENCE_COLORS = { active: '#22c55e', away: '#f59e0b', busy: '#ef4444', offline: '#6b7280' };
+function presenceDotHtml(u, withLabel) {
+  if (!u || !u.presence) return '';
+  const c = PRESENCE_COLORS[u.presence] || '#6b7280';
+  return `<span class="presence"><span class="status-dot" style="background:${c}"></span>${withLabel ? `<span class="muted">${esc(u.presence_label || '')}</span>` : ''}</span>`;
+}
+function streakChipHtml(streak) {
+  if (!streak || !streak.current) return '';
+  const dim = streak.at_risk ? ' dim' : '';
+  return `<span class="streak-chip${dim}" title="Streak: ${streak.current} day${streak.current === 1 ? '' : 's'}${streak.at_risk ? ' — at risk, message today!' : ''}">${streak.emoji || '🔥'} ${streak.current}${streak.at_risk ? ' ⏳' : ''}</span>`;
+}
 function friendRow(f) {
   const u = f.user, t = f.tier;
-  const sub = t.next
-    ? `Friends for ${t.days} day${t.days === 1 ? '' : 's'} · ${t.next.inDays} day${t.next.inDays === 1 ? '' : 's'} to ${t.next.label}`
-    : `Friends for ${t.days} days · top level!`;
+  const sub = f.family
+    ? `Family 👨‍👩‍👧 · friends for ${t.days} days`
+    : t.next
+      ? `Friends for ${t.days} day${t.days === 1 ? '' : 's'} · ${t.next.inDays} day${t.next.inDays === 1 ? '' : 's'} to ${t.next.label}`
+      : `Friends for ${t.days} days · top level!`;
+  const familyBtn = f.family
+    ? `<button class="btn small ghost" data-family-remove="${u.id}">Remove Family status</button>`
+    : (t && t.key === 'best' ? `<button class="btn small ghost" data-family-make="${u.id}">👨‍👩‍👧 Make Family</button>` : '');
   return `<div class="card friend-card">
     <div class="friend-row">${avatarHtml(u, 48)}
       <div class="grow">
-        <div class="name"><a href="#/profile/${esc(u.username)}" style="color:inherit">${esc(u.display_name)}</a> ${badgesHtml(u)}${f.unread ? ` <span class="badge unread">${f.unread} new</span>` : ''}</div>
+        <div class="name"><a href="#/profile/${esc(u.username)}" style="color:inherit">${esc(u.display_name)}</a> ${presenceDotHtml(u)} ${badgesHtml(u)}${f.unread ? ` <span class="badge unread">${f.unread} new</span>` : ''} ${streakChipHtml(f.streak)}</div>
         <div class="muted">@${esc(u.username)}${f.last_message ? ' · ' + esc(f.last_message.content.slice(0, 42)) : ''}</div>
         <div class="tier-line">${tierChip(t)} <span class="muted">${sub}</span></div>
       </div>
@@ -226,6 +242,7 @@ function friendRow(f) {
       <a class="btn small" href="#/chat/${u.id}">💬 Message</a>
       <button class="btn small" data-call-kind="audio" data-call-user="${u.id}" data-call-name="${esc(u.display_name)}">📞 Call</button>
       <button class="btn small" data-call-kind="video" data-call-user="${u.id}" data-call-name="${esc(u.display_name)}">🎥 Video</button>
+      ${familyBtn}
       <button class="btn small ghost" data-remove="${f.friendship_id}">Remove</button>
     </div>
   </div>`;
@@ -242,7 +259,9 @@ function personRow(r) {
 }
 function msgHtml(m) {
   const mine = App.user && m.sender_id === App.user.id;
-  return `<div class="msg ${mine ? 'me' : 'them'}"><div class="bubble">${esc(m.content)}</div><div class="msg-time">${timeAgo(m.created_at)}</div></div>`;
+  const img = m.image_url ? `<img class="msg-img" src="${esc(m.image_url)}" alt="Photo">` : '';
+  const txt = m.content ? `<div class="bubble">${esc(m.content)}</div>` : '';
+  return `<div class="msg ${mine ? 'me' : 'them'}">${img}${txt}<div class="msg-time">${timeAgo(m.created_at)}</div></div>`;
 }
 
 /* ---------------- Mystery pack helpers ---------------- */
@@ -476,6 +495,224 @@ const CallUI = {
   },
 };
 
+async function loadScheduledLums() {
+  const box = document.getElementById('lumPlanList');
+  if (!box || !App.user) return;
+  try {
+    const { lums } = await API.get('/lums/scheduled');
+    box.innerHTML = lums.length ? `<div class="card" style="margin-top:12px"><h4 style="margin:0 0 8px">🕒 Your planned Lums</h4>` +
+      lums.map(l => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line, #333)">
+        <div class="grow"><div>${esc((l.caption || '🎬 Lum').slice(0, 80))}</div>
+        <div class="post-time">Publishes ${esc(new Date(l.publish_at.replace(' ', 'T') + 'Z').toLocaleString())}</div></div>
+        <button class="btn small ghost" data-cancel-lum="${l.id}">Cancel</button></div>`).join('') + `</div>` : '';
+    box.querySelectorAll('[data-cancel-lum]').forEach(b => b.onclick = async () => {
+      try { await API.post('/lums/' + b.dataset.cancelLum + '/cancel-schedule', {}); toast('Planned Lum cancelled'); loadScheduledLums(); }
+      catch (e) { toast('Could not cancel'); }
+    });
+  } catch (e) { box.innerHTML = ''; }
+}
+
+/* ---------------- CAMERA (filters + stickers, Snapchat-style) ----------------
+   One reusable full-screen camera sheet. Looks are CSS filter strings shown
+   live on the preview and baked into the capture via canvas ctx.filter, so
+   what you see is what sends. Stickers are user-placed (drag to move,
+   ＋/－ to scale, ✕ to remove) — there is NO face tracking and no copy
+   claims any. Falls back to a file pick when the camera is unavailable. */
+const CAM_FILTERS = [
+  ['Normal', 'none'],
+  ['Noir', 'grayscale(1) contrast(1.25) brightness(1.05)'],
+  ['Vintage', 'sepia(0.55) contrast(1.05) brightness(1.02) saturate(0.85)'],
+  ['Neon', 'saturate(1.7) hue-rotate(18deg) contrast(1.1)'],
+  ['Dreamy', 'brightness(1.12) saturate(1.25) contrast(0.92)'],
+  ['Frost', 'brightness(1.08) hue-rotate(-14deg) saturate(0.8) contrast(1.02)'],
+  ['Sunset', 'sepia(0.35) saturate(1.45) hue-rotate(-10deg) brightness(1.05)'],
+  ['Pop', 'contrast(1.35) saturate(1.9) brightness(1.06)'],
+  ['Grain', 'grayscale(0.85) contrast(1.3) brightness(1.1)'],
+  ['Mirror', 'none'], // mirror is a transform, handled specially
+];
+const CAM_STICKERS = ['👑', '🕶️', '🐶', '🥸', '🌈', '⭐', '❤️', '🎩'];
+const CameraUI = {
+  // opts: { onCapture(file) } — called with the baked JPEG File on Send.
+  open(opts) {
+    if (!App.user) { Views.authModal(); return; }
+    const root = document.createElement('div');
+    root.className = 'camera-root';
+    root.innerHTML = `
+      <div class="camera-head"><button class="btn small ghost" id="camClose">✕ Close</button>
+        <div class="grow center" style="font-weight:800">📸 Live photo</div>
+        <button class="btn small ghost" id="camFlip">🔄 Flip</button></div>
+      <div class="camera-stage" id="camStage">
+        <video id="camVideo" autoplay playsinline muted></video>
+        <div class="cam-fallback hidden" id="camFallback">
+          <div style="font-size:44px">📷</div>
+          <div class="muted">Camera isn't available here — pick a photo instead.</div>
+          <button class="btn mt" id="camPick">Choose photo</button>
+        </div>
+        <img id="camShot" class="hidden" alt="Your capture">
+        <div id="camStickers"></div>
+      </div>
+      <div class="cam-rail" id="camRail">${CAM_FILTERS.map(([n], i) => `<button class="cam-filter${i === 0 ? ' active' : ''}" data-camf="${i}">${n}</button>`).join('')}</div>
+      <div class="cam-rail" id="camStickerRail">${CAM_STICKERS.map(s => `<button class="cam-sticker-btn" data-sticker="${s}">${s}</button>`).join('')}<span class="muted" style="align-self:center">Tap a sticker, then drag it into place</span></div>
+      <div class="camera-foot">
+        <button class="btn ghost" id="camRetake" style="display:none">↩ Retake</button>
+        <button class="cam-shutter" id="camShutter" aria-label="Take photo"></button>
+        <button class="btn" id="camSend" style="display:none">Send ➤</button>
+      </div>
+      <input type="file" id="camFile" accept="image/*" class="hidden">`;
+    document.body.appendChild(root);
+    document.documentElement.style.overflow = 'hidden';
+    const video = root.querySelector('#camVideo');
+    const stage = root.querySelector('#camStage');
+    const shot = root.querySelector('#camShot');
+    const stickerLayer = root.querySelector('#camStickers');
+    let stream = null, facing = 'user', filterIdx = 0, captured = null, shotUrl = null;
+    const placed = []; // {el, emoji, scale}
+    const cleanup = () => {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (shotUrl) URL.revokeObjectURL(shotUrl);
+      root.remove();
+      document.documentElement.style.overflow = '';
+    };
+    const applyPreviewFilter = () => {
+      const f = CAM_FILTERS[filterIdx][1];
+      video.style.filter = f === 'none' ? '' : f;
+      video.style.transform = CAM_FILTERS[filterIdx][0] === 'Mirror' ? 'scaleX(-1)' : '';
+      shot.style.filter = video.style.filter;
+      shot.style.transform = video.style.transform;
+    };
+    const startCam = async () => {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing }, audio: false });
+        video.srcObject = stream;
+        root.querySelector('#camFallback').classList.add('hidden');
+        video.classList.remove('hidden');
+      } catch (e) {
+        video.classList.add('hidden');
+        root.querySelector('#camFallback').classList.remove('hidden');
+      }
+    };
+    root.querySelector('#camClose').onclick = cleanup;
+    root.querySelector('#camFlip').onclick = () => { facing = facing === 'user' ? 'environment' : 'user'; startCam(); };
+    root.querySelector('#camPick').onclick = () => root.querySelector('#camFile').click();
+    root.querySelector('#camFile').onchange = (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      captured = f;
+      if (shotUrl) URL.revokeObjectURL(shotUrl);
+      shotUrl = URL.createObjectURL(f);
+      shot.src = shotUrl;
+      shot.classList.remove('hidden');
+      video.classList.add('hidden');
+      root.querySelector('#camFallback').classList.add('hidden');
+      root.querySelector('#camShutter').style.display = 'none';
+      root.querySelector('#camRetake').style.display = '';
+      root.querySelector('#camSend').style.display = '';
+    };
+    root.querySelectorAll('[data-camf]').forEach(b => b.onclick = () => {
+      filterIdx = +b.dataset.camf;
+      root.querySelectorAll('[data-camf]').forEach(x => x.classList.toggle('active', x === b));
+      applyPreviewFilter();
+    });
+    root.querySelectorAll('[data-sticker]').forEach(b => b.onclick = () => {
+      const el = document.createElement('div');
+      el.className = 'cam-sticker';
+      el.textContent = b.dataset.sticker;
+      el.style.left = '50%'; el.style.top = '38%';
+      const entry = { el, scale: 1, emoji: b.dataset.sticker };
+      const tools = document.createElement('span');
+      tools.className = 'cam-sticker-tools';
+      tools.innerHTML = `<button data-st="plus">＋</button><button data-st="minus">－</button><button data-st="del">✕</button>`;
+      el.appendChild(tools);
+      tools.querySelector('[data-st="plus"]').onclick = (ev) => { ev.stopPropagation(); entry.scale = Math.min(3, entry.scale + 0.25); el.style.fontSize = (54 * entry.scale) + 'px'; };
+      tools.querySelector('[data-st="minus"]').onclick = (ev) => { ev.stopPropagation(); entry.scale = Math.max(0.4, entry.scale - 0.25); el.style.fontSize = (54 * entry.scale) + 'px'; };
+      tools.querySelector('[data-st="del"]').onclick = (ev) => { ev.stopPropagation(); el.remove(); const i = placed.indexOf(entry); if (i >= 0) placed.splice(i, 1); };
+      let drag = null;
+      el.addEventListener('pointerdown', (ev) => {
+        if (ev.target.closest('.cam-sticker-tools')) return;
+        drag = { dx: ev.clientX - el.offsetLeft, dy: ev.clientY - el.offsetTop };
+        el.setPointerCapture(ev.pointerId);
+      });
+      el.addEventListener('pointermove', (ev) => {
+        if (!drag) return;
+        const r = stage.getBoundingClientRect();
+        el.style.left = (ev.clientX - r.left - drag.dx) + 'px';
+        el.style.top = (ev.clientY - r.top - drag.dy) + 'px';
+      });
+      el.addEventListener('pointerup', () => { drag = null; });
+      stickerLayer.appendChild(el);
+      placed.push(entry);
+    });
+    root.querySelector('#camShutter').onclick = () => {
+      if (!stream || !video.videoWidth) { root.querySelector('#camFile').click(); return; }
+      const c = document.createElement('canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      const ctx = c.getContext('2d');
+      const fname = CAM_FILTERS[filterIdx][0];
+      if (fname === 'Mirror') { ctx.translate(c.width, 0); ctx.scale(-1, 1); }
+      try { ctx.filter = CAM_FILTERS[filterIdx][1]; } catch (e) { /* older canvas: preview filter only */ }
+      ctx.drawImage(video, 0, 0);
+      // vignette for Vintage, extra grain for Grain/Pop posterize feel
+      ctx.filter = 'none';
+      if (fname === 'Vintage') {
+        const g = ctx.createRadialGradient(c.width / 2, c.height / 2, c.width / 3, c.width / 2, c.height / 2, c.width / 1.1);
+        g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(20,8,0,0.45)');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, c.width, c.height);
+      }
+      if (fname === 'Grain') {
+        const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+        for (let i = 0; i < d.length; i += 16) { const n = (Math.random() - 0.5) * 36; d[i] += n; d[i + 1] += n; d[i + 2] += n; }
+        ctx.putImageData(img, 0, 0);
+      }
+      if (fname === 'Pop') {
+        const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+        for (let i = 0; i < d.length; i += 4) { d[i] = Math.round(d[i] / 64) * 64; d[i + 1] = Math.round(d[i + 1] / 64) * 64; d[i + 2] = Math.round(d[i + 2] / 64) * 64; }
+        ctx.putImageData(img, 0, 0);
+      }
+      // stickers baked at their stage-relative positions
+      const sr = stage.getBoundingClientRect();
+      for (const s of placed) {
+        const r = s.el.getBoundingClientRect();
+        const cx = (r.left - sr.left + r.width / 2) / sr.width * c.width;
+        const cy = (r.top - sr.top + r.height / 2) / sr.height * c.height;
+        ctx.font = `${(54 * s.scale) / sr.width * c.width}px serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(s.emoji, cx, cy);
+      }
+      c.toBlob((blob) => {
+        if (!blob) { toast('Could not capture — try again'); return; }
+        captured = new File([blob], 'live-photo.jpg', { type: 'image/jpeg' });
+        if (shotUrl) URL.revokeObjectURL(shotUrl);
+        shotUrl = URL.createObjectURL(blob);
+        shot.src = shotUrl;
+        shot.classList.remove('hidden');
+        shot.style.filter = ''; shot.style.transform = '';
+        video.classList.add('hidden');
+        stickerLayer.innerHTML = ''; placed.length = 0;
+        root.querySelector('#camShutter').style.display = 'none';
+        root.querySelector('#camRetake').style.display = '';
+        root.querySelector('#camSend').style.display = '';
+      }, 'image/jpeg', 0.9);
+    };
+    root.querySelector('#camRetake').onclick = () => {
+      captured = null;
+      shot.classList.add('hidden');
+      root.querySelector('#camShutter').style.display = '';
+      root.querySelector('#camRetake').style.display = 'none';
+      root.querySelector('#camSend').style.display = 'none';
+      if (stream) video.classList.remove('hidden'); else root.querySelector('#camFallback').classList.remove('hidden');
+    };
+    root.querySelector('#camSend').onclick = () => {
+      if (!captured) return;
+      const f = captured;
+      cleanup();
+      opts.onCapture(f);
+    };
+    applyPreviewFilter();
+    startCam();
+  },
+};
+
 async function loadPlannedPosts() {
   const box = document.getElementById('planList');
   if (!box || !App.user) return;
@@ -532,20 +769,16 @@ const Views = {
         <div class="story-name">Your story</div></div>
       ${otherTrays.map(storyItem).join('')}`;
 
-    /* ---- composer (concept card; posts through the existing /posts flow) ---- */
+    /* ---- create bar (opens the modern create sheet; the old composer
+       card is retired — creating happens in Views.createMenu/createEditor,
+       posting through the same endpoints as always) ---- */
     const composerHtml = App.user ? `
-      <div class="card composer">
-        <div class="row">${avatarHtml(App.user, 46)}<div class="composer-bubble">What's happening in your world?</div></div>
-        <textarea id="cmpText" maxlength="2000" placeholder="Write a caption or share a moment…"></textarea>
-        <div class="feel-row" id="cmpFeelRow"></div>
-        <div class="muted mt" id="cmpMeta" style="display:none"></div>
-        <div class="row composer-foot">
-          <button class="chip-btn" id="cmpMediaBtn">▦ Photo / video</button>
-          <button class="chip-btn" id="cmpFeelBtn">◎ Feeling</button>
-          <span class="grow"></span>
-          <button class="btn" id="cmpPost">＋ Post</button>
-        </div>
-        <input type="file" id="cmpFile" accept="image/*,video/*" class="hidden">
+      <div class="card create-bar">
+        ${avatarHtml(App.user, 44)}
+        <button class="composer-bubble grow" id="cbOpen">What's happening in your world?</button>
+        <button class="cb-quick" id="cbPhoto" title="New post">▦</button>
+        <button class="cb-quick" id="cbCam" title="Camera">📸</button>
+        <button class="cb-quick" id="cbLum" title="New Lum">🎬</button>
       </div>` : `
       <div class="card composer center">
         <div style="font-size:17px;font-weight:800">✦ What's happening in your world?</div>
@@ -572,7 +805,7 @@ const Views = {
     const ys = document.getElementById('yourStory');
     if (ys) ys.onclick = () => {
       if (!App.user) { Views.authModal(); return; }
-      if (ownTray) Views.storyViewer(ownTray, 0); else location.hash = '#/create';
+      if (ownTray) Views.storyViewer(ownTray, 0); else Views.createEditor('story');
     };
 
     /* ---- tabs ---- */
@@ -589,7 +822,7 @@ const Views = {
         list.innerHTML = `<div class="card center"><div class="muted">Loading videos…</div></div>`;
         try {
           if (!lumsCache) { const d = await API.get('/lums'); lumsCache = d.lums || []; }
-          list.innerHTML = lumsCache.length ? lumsCache.map(lumCard).join('') : `<div class="card center muted">No videos yet — post one with the composer's Photo / video button. 🎬</div>`;
+          list.innerHTML = lumsCache.length ? lumsCache.map(lumCard).join('') : `<div class="card center muted">No videos yet — tap ＋ Create and post a Lum. 🎬</div>`;
         } catch (e) { list.innerHTML = `<div class="card center">Couldn't load videos.</div>`; }
         return;
       }
@@ -613,55 +846,12 @@ const Views = {
     el.querySelectorAll('#feedTabs button').forEach(b => b.addEventListener('click', () => { Views._feedTab = b.dataset.ft; }));
     wirePassageStars(el);
 
-    /* ---- composer wiring ---- */
+    /* ---- create bar wiring ---- */
     if (App.user) {
-      const fileIn = document.getElementById('cmpFile');
-      const meta = document.getElementById('cmpMeta');
-      let feeling = '';
-      document.getElementById('cmpMediaBtn').onclick = () => fileIn.click();
-      fileIn.onchange = () => {
-        const f = fileIn.files[0];
-        if (!f) { meta.style.display = 'none'; meta.textContent = ''; return; }
-        meta.style.display = '';
-        meta.textContent = f.type.startsWith('video/')
-          ? `🎬 ${f.name} — videos post as a Lum`
-          : `🖼 ${f.name} — attached to your post`;
-      };
-      const feelRow = document.getElementById('cmpFeelRow');
-      const FEELINGS = [['😊', 'happy'], ['🥰', 'loved'], ['🔥', 'fired up'], ['✨', 'inspired'], ['😴', 'sleepy'], ['😎', 'cool']];
-      feelRow.innerHTML = FEELINGS.map(([e, l]) => `<button class="feel-btn" data-feel="${e}|${l}">${e} ${l}</button>`).join('');
-      document.getElementById('cmpFeelBtn').onclick = () => feelRow.classList.toggle('open');
-      feelRow.querySelectorAll('[data-feel]').forEach(b => b.onclick = () => {
-        const [e, l] = b.dataset.feel.split('|');
-        feeling = ` — feeling ${e} ${l}`;
-        meta.style.display = '';
-        meta.textContent = `Feeling ${e} ${l}`;
-        feelRow.classList.remove('open');
-      });
-      document.getElementById('cmpPost').onclick = async () => {
-        const btn = document.getElementById('cmpPost');
-        const text = document.getElementById('cmpText').value.trim();
-        const f = fileIn.files[0];
-        if (!text && !f) { toast('Write something or add a photo/video first ✦'); return; }
-        btn.disabled = true; btn.textContent = 'Posting…';
-        try {
-          if (f && f.type.startsWith('video/')) {
-            const fd = new FormData();
-            fd.append('caption', (text + feeling).trim());
-            fd.append('video', f);
-            await API.upload('/lums', fd);
-            toast('Lum posted! 🎬'); App.checkMilestones();
-            location.hash = '#/lums';
-            return;
-          }
-          const fd = new FormData();
-          fd.append('content', (text + feeling).trim());
-          if (f) fd.append('image', f);
-          await API.upload('/posts', fd);
-          toast('Posted! ✦'); App.checkMilestones();
-          Views.feed(el);
-        } catch (e) { toast(e.data?.error || 'Could not post'); btn.disabled = false; btn.textContent = '＋ Post'; }
-      };
+      document.getElementById('cbOpen').onclick = () => Views.createMenu();
+      document.getElementById('cbPhoto').onclick = () => Views.createEditor('post');
+      document.getElementById('cbLum').onclick = () => Views.createEditor('lum');
+      document.getElementById('cbCam').onclick = () => CameraUI.open({ onCapture: (file) => Views.createEditor('post', file) });
     }
   },
 
@@ -779,6 +969,7 @@ const Views = {
     const { streams } = await API.get('/live');
     el.innerHTML = `
       <div class="card"><div class="row"><h3 style="margin:0" class="grow">🔴 Live</h3>
+        <a class="btn small ghost" href="#/live-rankings">🏆 Rankings</a>
         ${App.user ? `<button class="btn small" id="goLive">Go Live</button>` : `<span class="muted">Log in to go live</span>`}</div></div>
       ${streams.length ? streams.map(s => `
         <div class="card"><div class="row">
@@ -788,14 +979,7 @@ const Views = {
           <div class="mt"><a class="btn small" href="#/live/${s.id}">Join</a></div></div>`).join('')
         : `<div class="card center muted">Nobody is live right now.</div>`}`;
     const btn = document.getElementById('goLive');
-    if (btn) btn.onclick = async () => {
-      const title = prompt('Stream title:', 'Live now ✨') || 'Live now ✨';
-      try {
-        const { id } = await API.post('/live/start', { title });
-        App.checkMilestones();
-        location.hash = '#/live/' + id;
-      } catch (e) { toast(e.data?.error === 'You already have a live stream' ? 'You already have a live stream' : 'Could not start stream'); }
-    };
+    if (btn) btn.onclick = () => Views.startLiveFlow();
   },
 
   async liveRoom(el, id) {
@@ -811,15 +995,19 @@ const Views = {
     <div class="live-room" id="lvRoom">
       <div class="live-stage layout-1" id="lvStage"></div>
       <div class="live-top">
-        <div class="live-host-chip">${avatarHtml(stream, 30)}<div class="lhc-txt"><b>${esc(stream.display_name)}</b><span>${esc(stream.title || '')}</span></div><span class="live-badge">LIVE</span></div>
+        <div class="live-host-chip">${avatarHtml(stream, 30)}<div class="lhc-txt"><b>${esc(stream.display_name)}</b><span>${esc(stream.title || '')}</span></div><span class="live-badge">LIVE</span>${stream.weekly_champion ? `<span class="live-pill champ">👑 Weekly Champion</span>` : ''}${stream.weekly_rank ? `<span class="live-pill">🏆 #${stream.weekly_rank} this week</span>` : ''}</div>
         <div class="live-top-right"><span class="live-pill">👁 <span id="lvViewers">${stream.viewers_now || 0}</span></span><span class="live-pill">🪙 <span id="lvCoins">${stream.coins_earned || 0}</span></span><button class="live-x" id="lvClose">✕</button></div>
       </div>
       <div class="live-invite hidden" id="lvInvite"></div>
       <div class="live-hearts" id="lvHearts"></div>
+      <div class="gift-fx" id="lvGiftFx"></div>
+      <div class="top-gifter hidden" id="lvTopGifter"></div>
       <div class="live-rail">
         <button class="rail-btn" id="lvTap">❤️<span>Like</span></button>
         <button class="rail-btn" id="lvShare">↗️<span>Share</span></button>
         <button class="rail-btn" id="lvGift">🎁<span>Gift</span></button>
+        <button class="rail-btn" id="lvFiltersBtn">✨<span>Filters</span></button>
+        <button class="rail-btn" id="lvSound">🔊<span>Sound</span></button>
         ${isHost ? `<button class="rail-btn" id="lvHost">🎛️<span>Host</span></button>` : `<button class="rail-btn" id="lvStageBtn">🎤<span>Stage</span></button>`}
       </div>
       <div class="live-bottom">
@@ -828,6 +1016,7 @@ const Views = {
           : `<div class="live-comment"><button class="btn small grow" onclick="Views.authModal()">Log in to comment, tap & gift</button></div>`}
         <div class="live-toggles hidden" id="lvToggles"><button class="rail-btn mini" id="lvMic">🎙️</button><button class="rail-btn mini" id="lvCam">📷</button></div>
       </div>
+      <div class="live-filter-rail hidden" id="lvFilterRail"></div>
       <div class="live-sheet hidden" id="lvSheet"></div>
       <div class="live-ended hidden" id="lvEnded"></div>
     </div>`;
@@ -851,6 +1040,102 @@ const Views = {
     const stageUsers = () => participants.filter(p => p.status === 'joined' && ['host', 'cohost', 'guest'].includes(p.role));
     const sigSend = (to, kind, payload) => API.post(`/live/${id}/signal`, { to_id: to, kind, payload: typeof payload === 'string' ? payload : JSON.stringify(payload || {}) }).catch(() => {});
 
+    /* ---------------- gift catalogue, FX, sounds, top gifter ---------------- */
+    const GIFT_CATALOG = [
+      { name: 'Rose', emoji: '🌹', price: 1 }, { name: 'Heart', emoji: '❤️', price: 5 },
+      { name: 'Applause', emoji: '👏', price: 10 }, { name: 'Balloons', emoji: '🎈', price: 25 },
+      { name: 'Sundae', emoji: '🍦', price: 49 }, { name: 'Mixtape', emoji: '🎵', price: 99 },
+      { name: 'Fireworks', emoji: '🎆', price: 199 }, { name: 'Crown', emoji: '👑', price: 299 },
+      { name: 'Rocket', emoji: '🚀', price: 499 }, { name: 'Diamond', emoji: '💎', price: 999 },
+      { name: 'Lion', emoji: '🦁', price: 2999 }, { name: 'Galaxy', emoji: '🌌', price: 4999 },
+      { name: 'Lumi Castle', emoji: '🏰', price: 9999 },
+    ];
+    const giftFromNote = (note) => GIFT_CATALOG.find(g => note && note.includes(g.name)) || null;
+    const giftTier = (g) => g.price >= 2999 ? 'big' : g.price >= 199 ? 'mid' : 'small';
+    // Synthesized gift sounds (WebAudio — no audio files, no recordings).
+    const GiftSound = {
+      ctx: null,
+      get enabled() { return localStorage.getItem('luminous_gift_sound') !== 'off'; },
+      set enabled(v) { localStorage.setItem('luminous_gift_sound', v ? 'on' : 'off'); },
+      ensure() {
+        if (!this.ctx) { try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* no audio */ } }
+        if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+      },
+      tone(freq, at, dur, type, vol) {
+        const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+        o.type = type || 'sine'; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(vol || 0.12, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+        o.connect(g).connect(this.ctx.destination);
+        o.start(at); o.stop(at + dur + 0.05);
+      },
+      boom(at) {
+        const len = this.ctx.sampleRate * 0.5;
+        const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+        const src = this.ctx.createBufferSource(); src.buffer = buf;
+        const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 420;
+        const g = this.ctx.createGain(); g.gain.value = 0.22;
+        src.connect(f).connect(g).connect(this.ctx.destination);
+        src.start(at);
+      },
+      play(tier) {
+        if (!this.enabled) return;
+        this.ensure();
+        if (!this.ctx) return;
+        const t = this.ctx.currentTime;
+        if (tier === 'small') { this.tone(660, t, 0.12); this.tone(880, t + 0.07, 0.16); }
+        else if (tier === 'mid') { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, t + i * 0.09, 0.24, 'triangle', 0.12)); }
+        else {
+          [392, 523, 659, 784, 1047, 1319].forEach((f, i) => this.tone(f, t + i * 0.11, 0.5, 'triangle', 0.13));
+          this.boom(t + 0.1); this.boom(t + 0.5);
+        }
+      },
+    };
+    const fxEl = $('lvGiftFx');
+    const giftTotals = new Map();
+    const comboMap = new Map();
+    let fxLive = false; // animations only for gifts that arrive after room load
+    function bumpTopGifter(name, coins) {
+      if (!name || !coins) return;
+      giftTotals.set(name, (giftTotals.get(name) || 0) + coins);
+      let top = null, topCoins = 0;
+      for (const [n, c] of giftTotals) if (c > topCoins) { top = n; topCoins = c; }
+      const tg = $('lvTopGifter');
+      if (tg && top) { tg.textContent = `🏆 Top gifter: ${top} · 🪙 ${topCoins}`; tg.classList.remove('hidden'); }
+    }
+    function giftFx(e, g, combo) {
+      if (!fxEl || !g) return;
+      const tier = giftTier(g);
+      if (tier === 'small') {
+        const s = document.createElement('span');
+        s.className = 'gift-float';
+        s.style.left = (8 + Math.random() * 70) + '%';
+        s.innerHTML = `${g.emoji}${combo > 1 ? `<b class="combo">×${combo}</b>` : ''}`;
+        fxEl.appendChild(s);
+        setTimeout(() => s.remove(), 2800);
+      } else if (tier === 'mid') {
+        const d = document.createElement('div');
+        d.className = 'gift-mid fx-' + g.name.toLowerCase().replace(/\s+/g, '-');
+        d.innerHTML = `<span class="gm-emoji">${g.emoji}</span>` +
+          Array.from({ length: 10 }, (_, i) => `<span class="gm-spark" style="--a:${i * 36}deg">✦</span>`).join('') +
+          (combo > 1 ? `<b class="combo">×${combo}</b>` : '');
+        fxEl.appendChild(d);
+        setTimeout(() => d.remove(), 2400);
+      } else {
+        const d = document.createElement('div');
+        d.className = 'gift-big fx-' + g.name.toLowerCase().replace(/\s+/g, '-');
+        d.innerHTML = `<span class="gb-emoji">${g.emoji}</span><div class="gb-name">${esc(g.name)}</div>
+          <div class="gb-from">${esc(e.display_name || 'Someone')} sent it!</div>` +
+          (combo > 1 ? `<b class="combo">×${combo}</b>` : '');
+        fxEl.appendChild(d);
+        setTimeout(() => d.remove(), 3200);
+      }
+      GiftSound.play(tier);
+    }
+
     /* ---------------- chat / events ---------------- */
     function chatLine(html, sys) {
       const d = document.createElement('div');
@@ -864,10 +1149,26 @@ const Views = {
       if (seenEvents.has(e.id)) return;
       seenEvents.add(e.id);
       if (e.kind === 'comment') chatLine(`<b>${esc(e.display_name || 'Someone')}</b> ${esc(e.note || '')}`);
-      else if (e.kind === 'gift') chatLine(`🎁 <b>${esc(e.display_name || 'Someone')}</b> sent ${e.coins} coins${e.note ? ' — ' + esc(e.note) : ''}`, true);
+      else if (e.kind === 'gift') {
+        const g = giftFromNote(e.note);
+        bumpTopGifter(e.display_name, e.coins);
+        if (g) {
+          const key = (e.display_name || '') + '|' + g.name;
+          const now = Date.now();
+          const prev = comboMap.get(key);
+          const combo = prev && now - prev.at < 5000 ? prev.n + 1 : 1;
+          comboMap.set(key, { n: combo, at: now });
+          chatLine(`🎁 <b>${esc(e.display_name || 'Someone')}</b> sent ${g.emoji} ${esc(g.name)}${combo > 1 ? ` ×${combo}` : ''}`, true);
+          if (fxLive) giftFx(e, g, combo);
+        } else {
+          chatLine(`🎁 <b>${esc(e.display_name || 'Someone')}</b> sent ${e.coins} coins${e.note ? ' — ' + esc(e.note) : ''}`, true);
+        }
+      }
+      else if (e.kind === 'rank') chatLine(`📈 <b>${esc(e.display_name || 'The host')}</b> ${esc(e.note || '')}`, true);
       else if (e.kind === 'stage') chatLine(`🎤 <b>${esc(e.display_name || 'Someone')}</b> ${esc(e.note || '')}`, true);
     }
     (data.events || []).slice(-25).forEach(showEvent);
+    fxLive = true;
 
     /* ---------------- stage rendering ---------------- */
     function streamFor(uid) {
@@ -903,6 +1204,7 @@ const Views = {
           if (pr && pr.catch) pr.catch(() => { if (!mine && !v.muted) { v.muted = true; v.play().catch(() => {}); } });
         }
       });
+      applyPreviewFilter();
     }
 
     /* ---------------- WebRTC: stage mesh ---------------- */
@@ -1076,13 +1378,108 @@ const Views = {
       } catch (e) { /* ignore malformed signal */ }
     }
 
+    /* ---------------- live filters (TikTok-style) ----------------
+       The HOST's camera runs through a canvas: looks via ctx.filter, fun
+       overlays drawn per frame, and canvas.captureStream() is what's
+       published — viewers see the filtered feed. Switching filters only
+       changes the drawing, never the stream. Guests/co-hosts get the
+       looks on their own preview only. If canvas capture is missing,
+       the host degrades to preview-only with an honest note. */
+    const LIVE_LOOKS = [
+      ['natural', 'Natural', 'none'], ['glow', 'Glow', 'brightness(1.12) saturate(1.1) contrast(0.95)'],
+      ['vivid', 'Vivid', 'saturate(1.55) contrast(1.08)'], ['warm', 'Warm', 'sepia(0.32) saturate(1.3) brightness(1.04)'],
+      ['cool', 'Cool', 'hue-rotate(-14deg) saturate(0.9) brightness(1.05)'], ['noir', 'Noir', 'grayscale(1) contrast(1.25)'],
+      ['vintage', 'Vintage', 'sepia(0.55) contrast(1.02) saturate(0.85)'], ['neon', 'Neon', 'saturate(1.8) hue-rotate(20deg) contrast(1.12)'],
+    ];
+    const LIVE_FUN = [['crown', '👑 Crown'], ['shades', '🕶️ Shades'], ['hearts', '❤️ Hearts'], ['sparkle', '⭐ Sparkle frame']];
+    const filterState = { look: 'natural', fun: null };
+    let rawStream = null, pipe = null;
+    const lookCss = (id) => (LIVE_LOOKS.find(l => l[0] === id) || LIVE_LOOKS[0])[2];
+    const CAPTURE_OK = typeof HTMLCanvasElement !== 'undefined' && !!HTMLCanvasElement.prototype.captureStream;
+    function drawFunOverlay(ctx, w, h) {
+      const t = Date.now();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (filterState.fun === 'crown') { ctx.font = `${Math.round(w * 0.22)}px serif`; ctx.fillText('👑', w / 2, h * 0.15); }
+      else if (filterState.fun === 'shades') { ctx.font = `${Math.round(w * 0.3)}px serif`; ctx.fillText('🕶️', w / 2, h * 0.34); }
+      else if (filterState.fun === 'hearts') {
+        ctx.font = `${Math.round(w * 0.09)}px serif`;
+        for (let i = 0; i < 6; i++) {
+          const x = (i * 173 + t / 22) % w;
+          const y = h - ((t / 9 + i * 140) % (h * 1.1));
+          ctx.fillText('❤️', x, y);
+        }
+      } else if (filterState.fun === 'sparkle') {
+        ctx.font = `${Math.round(w * 0.1)}px serif`;
+        [[0.08, 0.1], [0.92, 0.1], [0.08, 0.9], [0.92, 0.9], [0.5, 0.06]].forEach(([px, py], i) => {
+          ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t / 300 + i);
+          ctx.fillText('⭐', w * px, h * py);
+        });
+        ctx.globalAlpha = 1;
+      }
+    }
+    function startPipe(raw) {
+      const canvas = document.createElement('canvas');
+      const v = document.createElement('video');
+      v.muted = true; v.playsInline = true; v.srcObject = raw;
+      v.play().catch(() => {});
+      const ctx = canvas.getContext('2d');
+      pipe = { canvas, video: v, raf: 0 };
+      const draw = () => {
+        if (!pipe) return;
+        if (v.videoWidth) {
+          if (canvas.width !== v.videoWidth) { canvas.width = v.videoWidth; canvas.height = v.videoHeight; }
+          try { ctx.filter = lookCss(filterState.look); } catch (e) { /* older canvas */ }
+          ctx.drawImage(v, 0, 0);
+          try { ctx.filter = 'none'; } catch (e) {}
+          if (filterState.fun) drawFunOverlay(ctx, canvas.width, canvas.height);
+        }
+        pipe.raf = requestAnimationFrame(draw);
+      };
+      draw();
+      const out = canvas.captureStream(30);
+      return new MediaStream([...out.getVideoTracks(), ...raw.getAudioTracks()]);
+    }
+    function stopPipe() {
+      if (!pipe) return;
+      cancelAnimationFrame(pipe.raf);
+      try { pipe.video.srcObject = null; } catch (e) {}
+      pipe = null;
+    }
+    function applyPreviewFilter() {
+      // Guests / degraded hosts: dress up the self-view only.
+      if (pipe || !localStream) return;
+      stageEl.querySelectorAll('video').forEach(vid => {
+        if (vid.srcObject === localStream) vid.style.filter = lookCss(filterState.look) === 'none' ? '' : lookCss(filterState.look);
+      });
+    }
+    function renderFilterRail() {
+      const rail = $('lvFilterRail');
+      if (!rail) return;
+      const note = isHost
+        ? (CAPTURE_OK ? 'Viewers see your filtered feed ✨' : 'This browser can’t stream filters — the look applies to your preview; viewers see your plain feed.')
+        : 'Filters dress up your own preview — your published feed stays plain.';
+      rail.innerHTML = `
+        <div class="fr-row"><span class="fr-label">Looks</span>${LIVE_LOOKS.map(([id2, label]) => `<button class="fr-chip${filterState.look === id2 ? ' active' : ''}" data-look="${id2}">${label}</button>`).join('')}</div>
+        <div class="fr-row"><span class="fr-label">Fun</span><button class="fr-chip${!filterState.fun ? ' active' : ''}" data-fun="">None</button>${LIVE_FUN.map(([id2, label]) => `<button class="fr-chip${filterState.fun === id2 ? ' active' : ''}" data-fun="${id2}">${label}</button>`).join('')}</div>
+        <div class="muted" style="padding:2px 4px 4px">${note}</div>`;
+      rail.querySelectorAll('[data-look]').forEach(b => b.onclick = () => { filterState.look = b.dataset.look; renderFilterRail(); applyPreviewFilter(); });
+      rail.querySelectorAll('[data-fun]').forEach(b => b.onclick = () => { filterState.fun = b.dataset.fun || null; renderFilterRail(); applyPreviewFilter(); });
+    }
+
     /* ---------------- stage presence ---------------- */
     async function startStage() {
       if (onStage || destroyed) return;
       if (!RTC_OK) { toast('Live video is not supported in this browser'); return; }
-      try { localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
+      try { rawStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
       catch (e) { toast('Camera/mic permission is needed to join the stage 🎤'); return; }
+      // Host publishes the filtered canvas feed when the browser supports
+      // it; everyone else publishes their camera as before (filters are
+      // preview-only for guests/co-hosts).
+      if (isHost && CAPTURE_OK) {
+        try { localStream = startPipe(rawStream); } catch (e) { localStream = rawStream; }
+      } else localStream = rawStream;
       onStage = true;
+      applyPreviewFilter();
       $('lvToggles').classList.remove('hidden');
       renderSig = ''; renderStage();
       // full mesh: I initiate to stage members with a higher user id (lower id offers — same rule as calls)
@@ -1090,8 +1487,10 @@ const Views = {
       if (isHost) syncViewerLinks();
     }
     function stopStage() {
+      stopPipe();
       if (localStream) localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
+      if (rawStream && rawStream !== localStream) rawStream.getTracks().forEach(t => t.stop());
+      localStream = null; rawStream = null;
       [...peers.keys()].forEach(uid => { sigSend(uid, 'bye', {}); closePeer(uid); });
       if (isHost) [...viewerPcs.keys()].forEach(uid => closePeer(uid));
       onStage = false;
@@ -1104,25 +1503,34 @@ const Views = {
     function closeSheet() { sheetEl.classList.add('hidden'); sheetEl.innerHTML = ''; }
     let freeCooldown = false;
     async function openGifts() {
-      let bal = '—';
+      let bal = 0;
       try { const w = await API.get('/wallet'); bal = w.wallet ? w.wallet.coins : 0; } catch (e) {}
-      openSheet(`<h4>🎁 Send a gift</h4><div class="muted">Your wallet: 🪙 <span id="lvBal">${bal}</span></div>
-        <div class="gift-row mt"><button class="btn small ghost" id="lvFreeGift">🎁 Free gift (+1)</button>
-        <button class="btn small ghost" data-gift="10">🪙 10</button><button class="btn small ghost" data-gift="50">💰 50</button>
-        <button class="btn small ghost" data-gift="100">💎 100</button><button class="btn small ghost" data-gift="500">👑 500</button></div>
-        <div class="muted mt">Gifts go to ${esc(stream.display_name)}'s stream. Free gift every 20s.</div>`);
+      openSheet(`<h4>🎁 Send a gift</h4>
+        <div class="muted">Your balance: 🪙 <span id="lvBal">${bal}</span> · gifts land in ${esc(stream.display_name)}'s stream coins.</div>
+        <div class="gift-grid mt">${GIFT_CATALOG.map(g => `
+          <button class="gift-item" data-gift-item="${esc(g.name)}" ${bal < g.price ? 'disabled' : ''}>
+            <span class="gi-emoji">${g.emoji}</span><span class="gi-name">${esc(g.name)}</span><span class="gi-price">🪙 ${g.price.toLocaleString()}</span>
+          </button>`).join('')}</div>
+        ${bal < 1 ? `<div class="muted mt">Not enough coins yet — earn them by watching, tapping ❤️ and sharing streams, going live, and finishing weekly missions. Coins are earned, never bought.</div>` : ''}
+        <div class="gift-row mt"><button class="btn small ghost" id="lvFreeGift">🎁 Free gift (+1)</button></div>
+        <div class="muted mt">Free gift every 20s.</div>`);
       $('lvFreeGift').onclick = async () => {
         if (freeCooldown) { toast('Free gift cooling down… ⏳'); return; }
         const r = await API.post(`/live/${id}/free-gift`).catch(() => null);
         if (r && !r.cooldown) { toast('Free gift sent! 🎁'); freeCooldown = true; setTimeout(() => freeCooldown = false, 20000); }
         else toast('Free gift cooling down… ⏳');
       };
-      sheetEl.querySelectorAll('[data-gift]').forEach(b => b.onclick = async () => {
-        const coins = +b.dataset.gift;
-        try { await API.post(`/live/${id}/gift`, { coins }); toast(`Sent ${coins} coins! 🪙`); App.refreshAuth(); closeSheet(); }
-        catch (e) { toast(e.data?.error || 'Could not send gift'); }
+      sheetEl.querySelectorAll('[data-gift-item]').forEach(b => b.onclick = async () => {
+        const g = GIFT_CATALOG.find(x => x.name === b.dataset.giftItem);
+        if (!g) return;
+        b.disabled = true;
+        try {
+          await API.post(`/live/${id}/gift`, { coins: g.price, note: `${g.emoji} ${g.name}` });
+          toast(`Sent ${g.emoji} ${g.name}!`); App.refreshAuth(); closeSheet();
+        } catch (e) { toast(e.data?.error || 'Could not send gift'); b.disabled = false; }
       });
     }
+
     function openStageSheet() {
       const mine = myPart;
       let body = '';
@@ -1202,7 +1610,10 @@ const Views = {
       if (recvPc) sigSend(stream.user_id, 'bye', {});
       [...peers.keys()].forEach(uid => closePeer(uid));
       if (recvPc) { try { recvPc.close(); } catch (e) {} recvPc = null; }
+      stopPipe();
       if (localStream) localStream.getTracks().forEach(t => t.stop());
+      if (rawStream && rawStream !== localStream) rawStream.getTracks().forEach(t => t.stop());
+      localStream = null; rawStream = null;
       if (onStage && !isHost && App.user) API.post(`/live/${id}/leave-stage`).catch(() => {});
       onStage = false;
     }
@@ -1288,6 +1699,14 @@ const Views = {
       toast(r && !r.already ? 'Shared! +10 coins 📣' : 'Already shared');
     };
     $('lvGift').onclick = () => { if (!App.user) { toast('Log in to send gifts 🎁'); return; } openGifts(); };
+    const filtersBtn = $('lvFiltersBtn');
+    if (filtersBtn) filtersBtn.onclick = () => { const r = $('lvFilterRail'); r.classList.toggle('hidden'); if (!r.classList.contains('hidden')) renderFilterRail(); };
+    const soundBtn = $('lvSound');
+    if (soundBtn) {
+      const paint = () => { soundBtn.innerHTML = GiftSound.enabled ? '🔊<span>Sound</span>' : '🔇<span>Muted</span>'; };
+      paint();
+      soundBtn.onclick = () => { GiftSound.enabled = !GiftSound.enabled; if (GiftSound.enabled) GiftSound.ensure(); paint(); toast(GiftSound.enabled ? 'Gift sounds on 🔊' : 'Gift sounds off 🔇'); };
+    }
     const sb = $('lvStageBtn'); if (sb) sb.onclick = openStageSheet;
     const hb = $('lvHost'); if (hb) hb.onclick = () => openHostSheet(lastData);
     $('lvClose').onclick = () => { if (isHost) endStream(); else { cleanup(); location.hash = '#/live'; } };
@@ -1305,7 +1724,7 @@ const Views = {
     };
     const mic = $('lvMic'), cam = $('lvCam');
     if (mic) mic.onclick = () => { if (!localStream) return; const t = localStream.getAudioTracks()[0]; if (t) { t.enabled = !t.enabled; mic.classList.toggle('off', !t.enabled); mic.textContent = t.enabled ? '🎙️' : '🔇'; } };
-    if (cam) cam.onclick = () => { if (!localStream) return; const t = localStream.getVideoTracks()[0]; if (t) { t.enabled = !t.enabled; cam.classList.toggle('off', !t.enabled); cam.textContent = t.enabled ? '📷' : '🚫'; } };
+    if (cam) cam.onclick = () => { if (!localStream) return; const t = (rawStream && rawStream.getVideoTracks()[0]) || localStream.getVideoTracks()[0]; if (t) { t.enabled = !t.enabled; cam.classList.toggle('off', !t.enabled); cam.textContent = t.enabled ? '📷' : '🚫'; } };
 
     /* ---------------- boot ---------------- */
     renderStage();
@@ -1511,22 +1930,29 @@ const Views = {
     let data;
     try { data = await API.get('/users/' + encodeURIComponent(username)); }
     catch (e) { el.innerHTML = `<div class="card center">User not found.</div>`; return; }
-    const { user: u, posts, lums, milestones, isOwn } = data;
-    const tab = App._profileTab || 'posts';
-    const statusColor = { active: '#22c55e', away: '#f59e0b', offline: '#6b7280' }[u.status] || '#22c55e';
+    const { user: u, posts, lums, milestones, isOwn, relationship } = data;
+    let tab = App._profileTab || 'posts';
+    if (tab === 'scheduled' && !isOwn) tab = 'posts';
+    const statsRow = [
+      u.public_age ? `Age ${u.public_age}` : '',
+      u.height ? `Height ${esc(u.height)}` : '',
+      u.weight ? `Weight ${esc(u.weight)}` : '',
+    ].filter(Boolean).join(' · ');
     el.innerHTML = `
       <div class="card">
         <div class="profile-banner" style="background:${esc(u.profile_color)}"></div>
         <div class="profile-head">${avatarHtml(u, 76)}
-          <div class="grow"><h2 style="margin:0">${esc(u.display_name)}</h2>
+          <div class="grow"><h2 style="margin:0">${esc(u.display_name)} ${presenceDotHtml(u, true)}</h2>
             <div class="muted">@${esc(u.username)}</div>
             ${u.is_developer ? `<div class="dev-title">👨‍💻 Founder &amp; Developer of Luminous</div>` : ''}
-            <div class="mt">${badgesHtml(u)}</div></div>
-          ${isOwn ? `<span class="row"><a class="btn small ghost" href="#/appearance">✦ Appearance</a><a class="btn small ghost" href="#/settings">Edit</a></span>` : (App.user ? `<span class="row"><button class="btn small" id="followBtn">${u.is_following ? 'Following ✓' : 'Follow'}</button></span>` : '')}
+            <div class="mt">${badgesHtml(u)}${u.weekly_champion ? ` <span class="badge champ">👑 Weekly Champion</span>` : ''}${relationship === 'family' ? ` <span class="badge champ">👨‍👩‍👧 Family</span>` : ''}</div></div>
+          ${isOwn ? `<span class="row"><a class="btn small ghost" href="#/companion">🐾 Companion</a><a class="btn small ghost" href="#/appearance">✦ Appearance</a><a class="btn small ghost" href="#/settings">Edit</a></span>` : (App.user ? `<span class="row"><button class="btn small" id="followBtn">${u.is_following ? 'Following ✓' : 'Follow'}</button><button class="btn small ghost" id="notifyBtn" title="Notify me when they post">${u.notify ? '🔔 On' : '🔔'}</button></span>` : '')}
         </div>
-        <div class="mt"><span class="status-dot" style="background:${statusColor}"></span><span class="muted">${esc(u.status)}</span>
-          ${u.public_age ? ` · <span class="muted">${u.public_age} yrs old</span>` : ''}</div>
+        ${!isOwn && App.user && relationship === 'best' ? `<div class="mt"><button class="btn small ghost" id="familyBtn">👨‍👩‍👧 Make Family</button> <span class="muted">Best Friends can become Family</span></div>` : ''}
+        ${!isOwn && App.user && relationship === 'family' ? `<div class="mt"><button class="btn small ghost" id="familyBtn">Remove Family status</button></div>` : ''}
         ${u.bio ? `<div class="mt">${esc(u.bio)}</div>` : ''}
+        ${statsRow ? `<div class="profile-stats">${statsRow}</div>` : ''}
+        ${u.companion ? `<div class="mt"><span class="chip">🐾 ${esc(u.companion.name)} the ${esc(u.companion.species)}</span></div>` : ''}
         ${u.hobbies?.length ? `<div class="chips">${u.hobbies.map(h => `<span class="chip">${esc(h)}</span>`).join('')}</div>` : ''}
         <div class="mt"><b>${u.follower_count ?? 0}</b> <span class="muted">Followers</span> · <b>${u.following_count ?? 0}</b> <span class="muted">Following</span></div>
         <div class="mt"><b>Level ${u.level}</b> <span class="muted">· ${u.xp} XP</span>
@@ -1537,6 +1963,7 @@ const Views = {
         <button data-t="posts" class="${tab === 'posts' ? 'active' : ''}">Posts</button>
         <button data-t="lums" class="${tab === 'lums' ? 'active' : ''}">Lums</button>
         <button data-t="milestones" class="${tab === 'milestones' ? 'active' : ''}">Milestones</button>
+        ${isOwn ? `<button data-t="scheduled" class="${tab === 'scheduled' ? 'active' : ''}">🕓 Scheduled</button>` : ''}
       </div>
       <div id="ptab"></div>
       ${passageStarHtml('profile-star', 'ps-profile')}
@@ -1551,8 +1978,32 @@ const Views = {
         Views.profile(el, username);
       } catch (e) { toast(e.data?.error || 'Could not follow'); followBtn.disabled = false; }
     };
+    const notifyBtn = document.getElementById('notifyBtn');
+    if (notifyBtn) notifyBtn.onclick = async () => {
+      if (!u.is_following) { toast('Follow them first to get post notifications 🔔'); return; }
+      try {
+        const r = await API.post(`/users/${u.id}/notify`, { enabled: !u.notify });
+        toast(r.notify ? `🔔 You'll be notified when ${u.display_name} posts` : '🔕 Post notifications off');
+        Views.profile(el, username);
+      } catch (e) { toast(e.data?.error || 'Could not update notifications'); }
+    };
+    const familyBtn = document.getElementById('familyBtn');
+    if (familyBtn) familyBtn.onclick = async () => {
+      const make = relationship === 'best';
+      if (!make && !confirm('Remove Family status? You stay Best Friends.')) return;
+      try {
+        await API.post(`/friends/${u.id}/family`, { family: make });
+        toast(make ? 'You’re family now 👨‍👩‍👧' : 'Back to Best Friends ⭐');
+        Views.profile(el, username);
+      } catch (e) { toast(e.data?.message || e.data?.error || 'Could not update'); }
+    };
     const ptab = document.getElementById('ptab');
-    if (tab === 'posts') ptab.innerHTML = posts.length ? posts.map(postCard).join('') : `<div class="card center muted">No posts yet.</div>`;
+    if (tab === 'scheduled' && isOwn) {
+      ptab.innerHTML = `<div class="muted" style="margin:4px 0 8px">Scheduled posts publish automatically at their time.</div><div id="planList"></div><div id="lumPlanList"></div>`;
+      loadPlannedPosts();
+      loadScheduledLums();
+    }
+    else if (tab === 'posts') ptab.innerHTML = posts.length ? posts.map(postCard).join('') : `<div class="card center muted">No posts yet.</div>`;
     else if (tab === 'lums') ptab.innerHTML = lums.length ? lums.map(l => `<div class="card"><b>${esc(l.caption || '🎬')}</b><div class="muted">👁 ${l.views} · ${timeAgo(l.created_at)}</div></div>`).join('') : `<div class="card center muted">No Lums yet.</div>`;
     else {
       const { milestones: all } = await API.get('/milestones').catch(() => ({ milestones: [] }));
@@ -1566,6 +2017,12 @@ const Views = {
   /* ---------------- SETTINGS ---------------- */
   async settings(el) {
     const { user: u } = await API.get('/auth/me');
+    // Height/weight are stored as composed display strings ("5'11\"", "180 cm",
+    // "82 kg", "180 lb") — parse them back into the unit inputs for editing.
+    const hCm = /^(\d+(?:\.\d+)?)\s*cm$/.exec(u.height || '');
+    const hFt = /^(\d+)'(\d+)"$/.exec(u.height || '');
+    const wKg = /^(\d+(?:\.\d+)?)\s*kg$/.exec(u.weight || '');
+    const wLb = /^(\d+(?:\.\d+)?)\s*lb$/.exec(u.weight || '');
     el.innerHTML = `<div class="card"><h3 style="margin:0 0 10px">⚙️ Customize profile</h3>
       <div class="form-grid">
         <label class="f">Display name<input id="sName" value="${esc(u.display_name)}" maxlength="60"></label>
@@ -1575,7 +2032,21 @@ const Views = {
           <label class="f">Status<select id="sStatus">
             <option value="active" ${u.status === 'active' ? 'selected' : ''}>🟢 Active</option>
             <option value="away" ${u.status === 'away' ? 'selected' : ''}>🟡 Away</option>
+            <option value="busy" ${u.status === 'busy' ? 'selected' : ''}>🔴 Busy</option>
             <option value="offline" ${u.status === 'offline' ? 'selected' : ''}>⚫ Offline</option></select></label>
+        </div>
+        <div class="two">
+          <label class="f">Height — unit<select id="sHUnit">
+            <option value="cm" ${!hFt ? 'selected' : ''}>cm</option>
+            <option value="ftin" ${hFt ? 'selected' : ''}>ft / in</option></select></label>
+          <span class="f" id="sHCmWrap" style="${hFt ? 'display:none' : ''}">Height (cm)<input id="sHCm" type="number" min="0" step="0.1" value="${hCm ? hCm[1] : ''}" placeholder="—"></span>
+          <span class="f" id="sHFtWrap" style="${hFt ? '' : 'display:none'}">Height (ft + in)<span class="row"><input id="sHFt" type="number" min="0" value="${hFt ? hFt[1] : ''}" placeholder="ft"><input id="sHIn" type="number" min="0" max="11" value="${hFt ? hFt[2] : ''}" placeholder="in"></span></span>
+        </div>
+        <div class="two">
+          <label class="f">Weight — unit<select id="sWUnit">
+            <option value="kg" ${!wLb ? 'selected' : ''}>kg</option>
+            <option value="lbs" ${wLb ? 'selected' : ''}>lbs</option></select></label>
+          <label class="f">Weight<input id="sWVal" type="number" min="0" step="0.1" value="${wKg ? wKg[1] : (wLb ? wLb[1] : '')}" placeholder="—"></label>
         </div>
         <div class="two">
           <label class="f">Profile color<input id="sColor" type="color" value="${esc(u.profile_color || '#a855f7')}" style="height:44px"></label>
@@ -1605,12 +2076,23 @@ const Views = {
         ${u.verified ? `<div class="muted mt">✓ Identity verified — you're earning on real post views.</div>` : ''}
       </div>`;
     document.getElementById('sType').value = u.account_type;
+    const hUnit = document.getElementById('sHUnit');
+    hUnit.onchange = () => {
+      document.getElementById('sHCmWrap').style.display = hUnit.value === 'cm' ? '' : 'none';
+      document.getElementById('sHFtWrap').style.display = hUnit.value === 'ftin' ? '' : 'none';
+    };
     document.getElementById('sSave').onclick = async () => {
       try {
+        let height = '';
+        if (hUnit.value === 'cm') { const v = document.getElementById('sHCm').value.trim(); if (v) height = `${v} cm`; }
+        else { const ft = document.getElementById('sHFt').value.trim(), inch = document.getElementById('sHIn').value.trim(); if (ft) height = `${ft}'${inch || 0}"`; }
+        const wv = document.getElementById('sWVal').value.trim();
+        const weight = wv ? `${wv} ${document.getElementById('sWUnit').value === 'lbs' ? 'lb' : 'kg'}` : '';
         await API.patch('/profile', {
           display_name: document.getElementById('sName').value,
           bio: document.getElementById('sBio').value,
           public_age: document.getElementById('sAge').value || null,
+          height, weight,
           status: document.getElementById('sStatus').value,
           profile_color: document.getElementById('sColor').value,
           avatar_emoji: document.getElementById('sEmoji').value || '✨',
@@ -1635,83 +2117,427 @@ const Views = {
   },
 
   /* ---------------- CREATE ---------------- */
+  /* ---------------- CREATE (modern sheet flow) ---------------- */
+  async startLiveFlow() {
+    if (!App.user) { Views.authModal(); return; }
+    const title = prompt('Stream title:', 'Live now ✨') || 'Live now ✨';
+    try {
+      const { id } = await API.post('/live/start', { title });
+      App.checkMilestones();
+      location.hash = '#/live/' + id;
+    } catch (e) { toast(e.data?.error === 'You already have a live stream' ? 'You already have a live stream' : 'Could not start stream'); }
+  },
+
+  // Bottom-sheet Create menu (raised ＋ button / FAB / create bar).
+  createMenu() {
+    if (!App.user) { Views.authModal(); return; }
+    const old = document.getElementById('createRoot');
+    if (old) old.remove();
+    const root = document.createElement('div');
+    root.id = 'createRoot';
+    root.className = 'sheet-overlay';
+    root.innerHTML = `
+      <div class="sheet-panel">
+        <div class="sheet-grip"></div>
+        <div class="row"><h3 style="margin:0" class="grow">Create</h3>
+          <button class="icon-btn" id="cmClose" aria-label="Close">✕</button></div>
+        <button class="create-opt" data-co="post"><span class="co-ic">📸</span><span class="grow"><b>Post</b><div class="muted">Photo post for your feed</div></span></button>
+        <button class="create-opt" data-co="lum"><span class="co-ic">🎬</span><span class="grow"><b>Lum</b><div class="muted">Short video</div></span></button>
+        <button class="create-opt" data-co="story"><span class="co-ic">📖</span><span class="grow"><b>Story</b><div class="muted">Disappears in 24 hours</div></span></button>
+        <button class="create-opt" data-co="camera"><span class="co-ic">🤳</span><span class="grow"><b>Camera</b><div class="muted">Fun filters &amp; stickers</div></span></button>
+        <button class="create-opt" data-co="live"><span class="co-ic">🔴</span><span class="grow"><b>Go Live</b><div class="muted">Stream to your people</div></span></button>
+      </div>`;
+    document.body.appendChild(root);
+    document.documentElement.style.overflow = 'hidden';
+    const close = () => { root.remove(); document.documentElement.style.overflow = ''; };
+    root.addEventListener('click', (e) => { if (e.target === root) close(); });
+    root.querySelector('#cmClose').onclick = close;
+    root.querySelectorAll('[data-co]').forEach(b => b.onclick = () => {
+      const k = b.dataset.co;
+      close();
+      if (k === 'live') Views.startLiveFlow();
+      else if (k === 'camera') CameraUI.open({ onCapture: (file) => Views.createEditor('post', file) });
+      else Views.createEditor(k);
+    });
+  },
+
+  // Two-step full-screen create sheet: (1) pick media, (2) preview + caption.
+  // Posts/Lums can be scheduled (Posts → the planned-posts system,
+  // Lums → publish_at). Same endpoints + field names as the old composer.
+  createEditor(kind, presetFile) {
+    if (!App.user) { Views.authModal(); return; }
+    const old = document.getElementById('editorRoot');
+    if (old) old.remove();
+    const TITLES = { post: 'New post', lum: 'New Lum', story: 'New story' };
+    const MAXLEN = { post: 2000, lum: 500, story: 500 };
+    const ACCEPT = { post: 'image/*,video/*', lum: 'video/*', story: 'image/*' };
+    const root = document.createElement('div');
+    root.id = 'editorRoot';
+    root.className = 'editor-overlay';
+    root.innerHTML = `
+      <div class="editor-head">
+        <button class="btn small ghost" id="edClose">✕</button>
+        <div class="grow center" style="font-weight:800">${TITLES[kind]}</div>
+        <button class="btn small" id="edPost" disabled>Post</button>
+      </div>
+      <div class="editor-progress hidden" id="edProg"><span id="edProgFill"></span></div>
+      <div class="editor-body">
+        <div id="edStep1">
+          <button class="pick-zone" id="edPick">
+            <span style="font-size:42px">${kind === 'lum' ? '🎬' : '🖼️'}</span>
+            <b>${kind === 'lum' ? 'Tap to choose a video' : 'Tap to choose media'}</b>
+            <span class="muted">${kind === 'lum' ? 'Videos post as a Lum' : kind === 'story' ? 'A photo for your story' : 'Photo, or a video (posts as a Lum)'}</span>
+          </button>
+          <button class="btn ghost" id="edCamera" style="width:100%;margin-top:10px">📸 Camera — filters &amp; stickers</button>
+          ${kind === 'post' ? `<button class="btn ghost" id="edTextOnly" style="width:100%;margin-top:10px">Text only →</button>` : ''}
+          <input type="file" id="edFile" accept="${ACCEPT[kind]}" class="hidden">
+        </div>
+        <div id="edStep2" class="hidden">
+          <div class="preview-wrap" id="edPreview"></div>
+          <div class="row mt"><span class="muted grow" id="edFileName"></span><button class="btn small ghost" id="edChange">Change</button></div>
+          <textarea id="edCaption" maxlength="${MAXLEN[kind]}" placeholder="${kind === 'story' ? 'Story text…' : 'Write a caption… #hashtags welcome'}"></textarea>
+          <div class="row"><span class="cap-count" id="edCount">0/${MAXLEN[kind]}</span><span class="grow"></span></div>
+          <div class="tag-chips" id="edTags"></div>
+          ${kind === 'post' ? `<div class="feel-row" id="edFeelRow"></div>
+          <div class="row mt"><button class="chip-btn" id="edFeelBtn">◎ Feeling</button><span class="muted" id="edFeelLabel"></span></div>` : ''}
+          ${kind !== 'story' ? `
+          <div class="sched-row">
+            <div class="grow"><b>🕒 Schedule</b><div class="muted">Publish at a specific date &amp; time</div></div>
+            <button class="toggle-pill" id="edSchedToggle" aria-pressed="false"><span></span></button>
+          </div>
+          <div class="hidden" id="edSchedBox">
+            <input type="datetime-local" id="edWhen">
+            <div class="muted mt">Scheduled posts publish automatically at their time.</div>
+          </div>` : ''}
+        </div>
+      </div>`;
+    document.body.appendChild(root);
+    document.documentElement.style.overflow = 'hidden';
+    let file = presetFile || null, fileUrl = null, feeling = '', scheduled = false;
+    const $ = (id) => root.querySelector('#' + id);
+    const close = () => {
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
+      root.remove();
+      document.documentElement.style.overflow = '';
+    };
+    const goFeed = () => {
+      if (!location.hash || location.hash === '#/' || location.hash === '#') {
+        const appEl = document.getElementById('app');
+        if (appEl) Views.feed(appEl);
+      } else location.hash = '#/';
+    };
+    const setFile = (f) => {
+      file = f || null;
+      if (fileUrl) { URL.revokeObjectURL(fileUrl); fileUrl = null; }
+      const pv = $('edPreview');
+      if (file) {
+        fileUrl = URL.createObjectURL(file);
+        pv.innerHTML = file.type.startsWith('video/')
+          ? `<video src="${fileUrl}" controls playsinline></video>`
+          : `<img src="${fileUrl}" alt="Selected media">`;
+        $('edFileName').textContent = file.name || 'Camera photo';
+      } else if (kind === 'post') {
+        pv.innerHTML = `<div class="text-preview">${avatarHtml(App.user, 40)}<div><b>${esc(App.user.display_name)}</b><div class="muted">Text post</div></div></div>`;
+        $('edFileName').textContent = '';
+      }
+      $('edStep1').classList.add('hidden');
+      $('edStep2').classList.remove('hidden');
+      updatePostBtn();
+    };
+    const updatePostBtn = () => {
+      const btn = $('edPost');
+      btn.textContent = scheduled ? 'Schedule' : (kind === 'story' ? 'Share' : 'Post');
+      const hasText = $('edCaption').value.trim().length > 0;
+      btn.disabled = !(file || (kind === 'post' && hasText) || (kind === 'story' && hasText));
+    };
+    $('edClose').onclick = close;
+    $('edPick').onclick = () => $('edFile').click();
+    $('edChange').onclick = () => $('edFile').click();
+    $('edFile').onchange = () => { const f = $('edFile').files[0]; if (f) setFile(f); };
+    const camBtn = $('edCamera');
+    if (camBtn) camBtn.onclick = () => CameraUI.open({ onCapture: (f) => setFile(f) });
+    const textOnly = $('edTextOnly');
+    if (textOnly) textOnly.onclick = () => setFile(null);
+    const cap = $('edCaption');
+    cap.addEventListener('input', () => {
+      $('edCount').textContent = `${cap.value.length}/${MAXLEN[kind]}`;
+      const tags = [...new Set((cap.value.match(/#[\p{L}\p{N}_]+/gu) || []))].slice(0, 8);
+      $('edTags').innerHTML = tags.map(t => `<span class="tag-chip">${esc(t)}</span>`).join('');
+      updatePostBtn();
+    });
+    if (kind === 'post') {
+      const FEELINGS = [['😊', 'happy'], ['🥰', 'loved'], ['🔥', 'fired up'], ['✨', 'inspired'], ['😴', 'sleepy'], ['😎', 'cool']];
+      const row = $('edFeelRow');
+      row.innerHTML = FEELINGS.map(([e, l]) => `<button class="feel-btn" data-feel="${e}|${l}">${e} ${l}</button>`).join('');
+      $('edFeelBtn').onclick = () => row.classList.toggle('open');
+      row.querySelectorAll('[data-feel]').forEach(b => b.onclick = () => {
+        const [e, l] = b.dataset.feel.split('|');
+        feeling = ` — feeling ${e} ${l}`;
+        $('edFeelLabel').textContent = `Feeling ${e} ${l}`;
+        row.classList.remove('open');
+      });
+    }
+    if (kind !== 'story') {
+      const t = new Date(Date.now() + 24 * 3600 * 1000);
+      const pad = (n) => String(n).padStart(2, '0');
+      $('edWhen').value = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
+      $('edSchedToggle').onclick = () => {
+        scheduled = !scheduled;
+        $('edSchedToggle').classList.toggle('on', scheduled);
+        $('edSchedToggle').setAttribute('aria-pressed', String(scheduled));
+        $('edSchedBox').classList.toggle('hidden', !scheduled);
+        updatePostBtn();
+      };
+    }
+    $('edPost').onclick = async () => {
+      const btn = $('edPost');
+      const text = cap.value.trim();
+      // A video chosen in the Post editor posts as a Lum (legacy behaviour).
+      const effKind = (kind === 'post' && file && file.type.startsWith('video/')) ? 'lum' : kind;
+      if (effKind === 'lum' && !file) { toast('Choose a video first 🎬'); return; }
+      if (effKind === 'post' && !text && !file) { toast('Write something or add a photo first ✦'); return; }
+      if (effKind === 'story' && !text && !file) { toast('Add text or a photo first 📖'); return; }
+      let whenIso = null;
+      if (scheduled && effKind !== 'story') {
+        const w = $('edWhen').value;
+        if (!w) { toast('Pick the date and time first 🕒'); return; }
+        const when = new Date(w);
+        if (isNaN(when) || when.getTime() < Date.now() + 60000) { toast('Pick a date and time at least a minute from now 🕒'); return; }
+        whenIso = when.toISOString();
+      }
+      btn.disabled = true;
+      btn.textContent = scheduled ? 'Scheduling…' : 'Posting…';
+      const prog = $('edProg'), fill = $('edProgFill');
+      prog.classList.remove('hidden');
+      fill.style.width = '8%';
+      try {
+        const fd = new FormData();
+        let path;
+        if (effKind === 'lum') {
+          fd.append('caption', text); fd.append('video', file);
+          if (whenIso) fd.append('publish_at', whenIso);
+          path = '/lums';
+        } else if (effKind === 'story') {
+          fd.append('text', text); if (file) fd.append('image', file);
+          path = '/stories';
+        } else {
+          fd.append('content', (text + feeling).trim()); if (file) fd.append('image', file);
+          if (whenIso) fd.append('publish_at', whenIso);
+          path = whenIso ? '/posts/schedule' : '/posts';
+        }
+        await API.uploadProgress(path, fd, (r) => { fill.style.width = Math.max(8, Math.round(r * 92)) + '%'; });
+        fill.style.width = '100%';
+        if (scheduled) {
+          toast(`Planned for ${new Date(whenIso).toLocaleString()} 🕒`);
+        } else if (effKind === 'lum') { toast('Lum posted! 🎬'); App.checkMilestones(); }
+        else if (effKind === 'story') { toast('Story shared! 📖'); App.checkMilestones(); }
+        else { toast('Posted! ✦'); App.checkMilestones(); }
+        const destTab = effKind === 'lum' && !scheduled ? 'video' : null;
+        close();
+        if (destTab) Views._feedTab = destTab;
+        goFeed();
+      } catch (e) {
+        toast(e.data?.error || 'Could not publish');
+        btn.disabled = false;
+        updatePostBtn();
+        prog.classList.add('hidden');
+      }
+    };
+    if (presetFile) setFile(presetFile);
+    updatePostBtn();
+  },
+
+  /* ---------------- CREATE HUB (#/create) ---------------- */
   async create(el) {
     if (!App.user) { el.innerHTML = `<div class="card center">Log in to create. <div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div></div>`; return; }
-    el.innerHTML = `<div class="card"><h3 style="margin:0 0 10px">＋ Create</h3>
-      <div class="tabs">
-        <button data-t="post" class="active">📝 Post</button>
-        <button data-t="story">📖 Story</button>
-        <button data-t="lum">🎬 Lum</button>
-      </div><div id="ctab"></div></div>`;
-    const ctab = document.getElementById('ctab');
-    const show = (t) => {
-      el.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.t === t));
-      if (t === 'post') ctab.innerHTML = `
-        <div class="form-grid"><textarea id="pText" maxlength="2000" placeholder="What's on your mind?"></textarea>
-        <label class="f">Photo (optional)<input id="pImg" type="file" accept="image/*"></label>
-        <label class="check-row"><input id="pPlan" type="checkbox"> <span>🕒 Plan for a specific date &amp; time</span></label>
-        <label class="f hidden" id="pWhenF">Publish at<input id="pWhen" type="datetime-local"></label>
-        <button class="btn" id="pGo">Publish post</button></div>
-        <div id="planList"></div>`;
-      if (t === 'story') ctab.innerHTML = `
-        <div class="form-grid"><textarea id="sText" maxlength="500" placeholder="Story text…"></textarea>
-        <label class="f">Image (optional)<input id="sImg" type="file" accept="image/*"></label>
-        <div class="muted">Stories disappear after 24 hours.</div>
-        <button class="btn" id="sGo">Share story</button></div>`;
-      if (t === 'lum') ctab.innerHTML = `
-        <div class="form-grid"><input id="lCap" maxlength="500" placeholder="Caption…">
-        <label class="f">Video<input id="lVid" type="file" accept="video/*"></label>
-        <button class="btn" id="lGo">Upload Lum</button></div>`;
-      const planBox = document.getElementById('pPlan');
-      if (planBox) {
-        planBox.onchange = () => {
-          document.getElementById('pWhenF').classList.toggle('hidden', !planBox.checked);
-          document.getElementById('pGo').textContent = planBox.checked ? '🕒 Plan post' : 'Publish post';
-        };
-        loadPlannedPosts();
-      }
-      const go = async (btnId, fn) => {
-        const b = document.getElementById(btnId);
-        if (b) b.onclick = async () => { b.disabled = true; b.textContent = 'Publishing…'; try { await fn(); } finally { b.disabled = false; } };
+    el.innerHTML = `
+      <div class="card">
+        <h3 style="margin:0 0 10px">＋ Create</h3>
+        <button class="create-opt" data-hub="post"><span class="co-ic">📸</span><span class="grow"><b>Post</b><div class="muted">Photo post for your feed</div></span></button>
+        <button class="create-opt" data-hub="lum"><span class="co-ic">🎬</span><span class="grow"><b>Lum</b><div class="muted">Short video</div></span></button>
+        <button class="create-opt" data-hub="story"><span class="co-ic">📖</span><span class="grow"><b>Story</b><div class="muted">Disappears in 24 hours</div></span></button>
+        <button class="create-opt" data-hub="camera"><span class="co-ic">🤳</span><span class="grow"><b>Camera</b><div class="muted">Fun filters &amp; stickers</div></span></button>
+        <button class="create-opt" data-hub="live"><span class="co-ic">🔴</span><span class="grow"><b>Go Live</b><div class="muted">Stream to your people</div></span></button>
+      </div>
+      <div class="card">
+        <h4 style="margin:0 0 6px">🕓 Scheduled</h4>
+        <div class="muted">Scheduled posts publish automatically at their time.</div>
+        <div id="planList"></div>
+        <div id="lumPlanList"></div>
+      </div>`;
+    el.querySelectorAll('[data-hub]').forEach(b => b.onclick = () => {
+      const k = b.dataset.hub;
+      if (k === 'live') Views.startLiveFlow();
+      else if (k === 'camera') CameraUI.open({ onCapture: (file) => Views.createEditor('post', file) });
+      else Views.createEditor(k);
+    });
+    loadPlannedPosts();
+    loadScheduledLums();
+  },
+
+  /* ---------------- NOTIFICATIONS ---------------- */
+  async notifications(el) {
+    if (!App.user) { el.innerHTML = `<div class="card center">Log in to see notifications.</div>`; return; }
+    el.innerHTML = `<div class="card center"><div class="muted">Loading notifications…</div></div>`;
+    try {
+      const { notifications, unread } = await API.get('/notifications');
+      el.innerHTML = `
+        <div class="card"><div class="row"><h3 style="margin:0" class="grow">🔔 Notifications</h3>
+          ${unread ? `<button class="btn small ghost" id="notifRead">Mark all read</button>` : ''}</div>
+          ${notifications.length ? notifications.map(n => `
+            <a class="notif-row${n.read ? '' : ' unread'}" href="${n.type === 'lum' ? '#/lums' : '#/profile/' + esc(n.actor?.username || '')}">
+              ${n.actor ? avatarHtml(n.actor, 40) : ''}
+              <span class="grow">🔔 <b>${esc(n.actor?.display_name || 'Someone')}</b> posted a new ${n.type === 'lum' ? 'Lum 🎬' : 'post'}
+              <div class="post-time">${timeAgo(n.created_at)}</div></span>
+              ${n.read ? '' : '<span class="notif-dot"></span>'}
+            </a>`).join('') : `<div class="muted center" style="padding:18px">No notifications yet. Tick the 🔔 on a friend's profile to hear when they post.</div>`}
+        </div>`;
+      App.refreshBell();
+      const btn = document.getElementById('notifRead');
+      if (btn) btn.onclick = async () => {
+        try { await API.post('/notifications/read', {}); Views.notifications(el); }
+        catch (e) { toast('Could not mark read'); }
       };
-      go('pGo', async () => {
-        const fd = new FormData();
-        fd.append('content', document.getElementById('pText').value);
-        const f = document.getElementById('pImg').files[0]; if (f) fd.append('image', f);
-        const plan = document.getElementById('pPlan');
-        if (plan && plan.checked) {
-          const w = document.getElementById('pWhen').value;
-          if (!w) { toast('Pick the date and time first 🕒'); return; }
-          fd.append('publish_at', new Date(w).toISOString());
-          try {
-            const r = await API.upload('/posts/schedule', fd);
-            toast(`Planned for ${new Date(r.publish_at.replace(' ', 'T') + 'Z').toLocaleString()} 🕒`);
-            document.getElementById('pText').value = '';
-            document.getElementById('pGo').textContent = '🕒 Plan post';
-            loadPlannedPosts();
-          } catch (e) { toast(e.data?.error || 'Could not plan the post'); document.getElementById('pGo').textContent = '🕒 Plan post'; }
-          return;
-        }
-        try { await API.upload('/posts', fd); toast('Posted! ✨'); App.checkMilestones(); location.hash = '#/'; }
-        catch (e) { toast(e.data?.error || 'Could not publish'); }
-      });
-      go('sGo', async () => {
-        const fd = new FormData();
-        fd.append('text', document.getElementById('sText').value);
-        const f = document.getElementById('sImg').files[0]; if (f) fd.append('image', f);
-        try { await API.upload('/stories', fd); toast('Story shared! 📖'); App.checkMilestones(); location.hash = '#/stories'; }
-        catch (e) { toast(e.data?.error || 'Could not share'); }
-      });
-      go('lGo', async () => {
-        const fd = new FormData();
-        fd.append('caption', document.getElementById('lCap').value);
-        const f = document.getElementById('lVid').files[0]; if (f) fd.append('video', f);
-        try { await API.upload('/lums', fd); toast('Lum uploaded! 🎬'); App.checkMilestones(); location.hash = '#/lums'; }
-        catch (e) { toast(e.data?.error || 'Could not upload'); }
-      });
+    } catch (e) { el.innerHTML = `<div class="card center">Couldn't load notifications.</div>`; }
+  },
+
+  /* ---------------- FURRY COMPANION ---------------- */
+  async myCompanion(el) {
+    if (!App.user) { el.innerHTML = `<div class="card center">Log in to meet your companion.</div>`; return; }
+    el.innerHTML = `<div class="card center"><div class="muted">Fetching your companion…</div></div>`;
+    let data;
+    try { data = await API.get('/companion'); }
+    catch (e) { el.innerHTML = `<div class="card center">Couldn't load your companion.</div>`; return; }
+    const p = data.pet;
+    if (!p) {
+      const breeds = data.breeds || { dog: [], cat: [] };
+      el.innerHTML = `
+        <div class="card center">
+          <div style="font-size:52px">🐾</div>
+          <h3 style="margin:6px 0">Adopt a furry companion</h3>
+          <div class="muted">A dog or cat of your own inside Luminous. Feed them, give them water,
+          and give them attention every day to grow your bond. They never leave — they always wait for you. ❤️</div>
+        </div>
+        <div class="card"><div class="form-grid">
+          <label class="f">Species<select id="petSpecies">
+            <option value="dog">🐶 Dog</option><option value="cat">🐱 Cat</option></select></label>
+          <label class="f">Breed<select id="petBreed"></select></label>
+          <label class="f">Name<input id="petName" maxlength="20" placeholder="e.g. Biscuit"></label>
+          <label class="f">Age (years)<input id="petAge" type="number" min="0" max="20" value="1"></label>
+          <div class="muted" id="petStageHint"></div>
+          <button class="btn" id="petAdopt">Adopt 🐾</button>
+        </div></div>`;
+      const breedSel = document.getElementById('petBreed');
+      const stageHint = () => {
+        const sp = document.getElementById('petSpecies').value;
+        const age = parseInt(document.getElementById('petAge').value) || 0;
+        document.getElementById('petStageHint').textContent =
+          age < 1 ? (sp === 'dog' ? 'Life stage: Puppy 🐶' : 'Life stage: Kitten 🐱')
+            : age <= 7 ? 'Life stage: Adult' : 'Life stage: Senior';
+      };
+      const fillBreeds = () => {
+        const sp = document.getElementById('petSpecies').value;
+        breedSel.innerHTML = (breeds[sp] || []).map(b => `<option>${esc(b)}</option>`).join('');
+        stageHint();
+      };
+      document.getElementById('petSpecies').onchange = fillBreeds;
+      document.getElementById('petAge').oninput = stageHint;
+      fillBreeds();
+      document.getElementById('petAdopt').onclick = async () => {
+        try {
+          await API.post('/companion/adopt', {
+            species: document.getElementById('petSpecies').value,
+            breed: breedSel.value,
+            name: document.getElementById('petName').value,
+            age_years: parseInt(document.getElementById('petAge').value) || 0,
+          });
+          toast('Welcome home! 🐾');
+          Views.myCompanion(el);
+        } catch (e) { toast(e.data?.error || 'Could not adopt'); }
+      };
+      return;
+    }
+    const meter = (label, icon, v) => `
+      <div class="pet-meter"><span class="pm-label">${icon} ${label}</span>
+        <div class="pm-bar"><i style="width:${v}%"></i></div><b>${v}%</b></div>`;
+    const readyIn = (ms) => ms <= 0 ? '' : ` <span class="muted">(again in ${Math.ceil(ms / 3600000)}h)</span>`;
+    el.innerHTML = `
+      <div class="card pet-home">
+        <div class="pet-scene"><span class="pet-big">${p.emoji}</span><span class="pet-face">${p.face}</span></div>
+        <h3 style="margin:4px 0">${esc(p.name)}</h3>
+        <div class="muted">${esc(p.breed)} ${p.species === 'dog' ? 'dog' : 'cat'} · ${p.age_years} yr${p.age_years === 1 ? '' : 's'} old · ${esc(p.stage)}</div>
+        <div class="pet-mood">${esc(p.mood_label)} — “${esc(p.line)}”</div>
+        ${meter('Food', '🍖', p.meters.food)}
+        ${meter('Water', '💧', p.meters.water)}
+        ${meter('Love', '❤️', p.meters.love)}
+        <div class="row mt">
+          <button class="btn small" data-care="food" ${p.care_ready_in.food > 0 ? 'disabled' : ''}>🍖 Feed</button>
+          <button class="btn small" data-care="water" ${p.care_ready_in.water > 0 ? 'disabled' : ''}>💧 Give Water</button>
+          <button class="btn small" data-care="play" ${p.care_ready_in.play > 0 ? 'disabled' : ''}>❤️ Play / Pet</button>
+        </div>
+        <div class="muted mt">Care counts once per kind every ~6 hours.${p.care_ready_in.food > 0 ? readyIn(p.care_ready_in.food) : ''}</div>
+        <div class="pet-bond mt">🔥 Care streak: <b>${p.care_streak} day${p.care_streak === 1 ? '' : 's'}</b> · Bond Lv ${p.bond_level} — <b>${esc(p.bond_title)}</b> (${p.bond_xp} care days)</div>
+        <div class="row mt">
+          <button class="btn small ghost" id="petRename">✏️ Rename</button>
+        </div>
+        <div class="muted mt">${esc(p.name)} always waits for you — a missed day only makes them sad, never gone. 🐾</div>
+      </div>`;
+    el.querySelectorAll('[data-care]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await API.post('/companion/care', { kind: b.dataset.care });
+        if (r.care_day) toast('Care day complete! Bond grows ❤️');
+        else if (!r.counted) toast('Already cared for recently — it counts again in a few hours');
+        else toast('💚 ' + p.name + ' feels cared for');
+        Views.myCompanion(el);
+      } catch (e) { toast(e.data?.error || 'Could not care'); b.disabled = false; }
+    });
+    document.getElementById('petRename').onclick = async () => {
+      const name = prompt('New name:', p.name);
+      if (!name || !name.trim()) return;
+      try { await API.post('/companion/rename', { name: name.trim() }); toast('Renamed ✨'); Views.myCompanion(el); }
+      catch (e) { toast(e.data?.error || 'Could not rename'); }
     };
-    el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => show(b.dataset.t));
-    show('post');
+  },
+
+  /* ---------------- WEEKLY LIVE RANKINGS ---------------- */
+  async liveRankings(el) {
+    const board = Views._rankBoard || 'hosts';
+    const period = Views._rankPeriod || 'current';
+    el.innerHTML = `<div class="card center"><div class="muted">Loading rankings…</div></div>`;
+    let data;
+    try { data = await API.get(`/live/rankings?board=${board}&period=${period}`); }
+    catch (e) { el.innerHTML = `<div class="card center">Couldn't load rankings.</div>`; return; }
+    const move = (m) => m === 'NEW' ? '<span class="rank-new">NEW</span>'
+      : m > 0 ? `<span class="rank-up">▲${m}</span>` : m < 0 ? `<span class="rank-down">▼${-m}</span>` : '<span class="muted">—</span>';
+    const medal = ['🥇', '🥈', '🥉'];
+    const row = (e) => `
+      <div class="rank-row${e.rank <= 3 ? ' podium' : ''}">
+        <span class="rank-num">${medal[e.rank - 1] || '#' + e.rank}</span>
+        ${e.user ? avatarHtml(e.user, 40) : ''}
+        <span class="grow"><a href="#/profile/${esc(e.user?.username || '')}" style="color:inherit"><b>${esc(e.user?.display_name || 'Someone')}</b></a>
+          <div class="muted">@${esc(e.user?.username || '')}</div></span>
+        ${move(e.movement)}
+        <b>🪙 ${e.total}</b>
+      </div>`;
+    el.innerHTML = `
+      <div class="card">
+        <h3 style="margin:0 0 8px">🏆 Live Rankings</h3>
+        <div class="feed-tabs">
+          <button data-rb="hosts" class="${board === 'hosts' ? 'active' : ''}">🏆 Top Hosts</button>
+          <button data-rb="gifters" class="${board === 'gifters' ? 'active' : ''}">💝 Top Gifters</button>
+        </div>
+        <div class="feed-tabs" style="margin-top:6px">
+          <button data-rp="current" class="${period === 'current' ? 'active' : ''}">This week</button>
+          <button data-rp="last" class="${period === 'last' ? 'active' : ''}">Last week</button>
+        </div>
+        <div class="muted" style="margin:8px 0">Week of ${esc(data.week_key)} · Monday to Sunday (Toronto) · from real gift events only</div>
+        ${data.me ? `<div class="rank-row me"><span class="rank-num">#${data.me.rank}</span><span class="grow"><b>You</b></span><b>🪙 ${data.me.total}</b></div>` : ''}
+        ${data.entries.length ? data.entries.map(row).join('') : `<div class="muted center" style="padding:16px">No gifts yet ${period === 'current' ? 'this week' : 'that week'} — the board is wide open. 🎁</div>`}
+        <div class="muted mt">Last week's #1 host wears the 👑 Weekly Champion crown all week. Badges and bragging rights only — no coin prizes.</div>
+      </div>`;
+    el.querySelectorAll('[data-rb]').forEach(b => b.onclick = () => { Views._rankBoard = b.dataset.rb; Views.liveRankings(el); });
+    el.querySelectorAll('[data-rp]').forEach(b => b.onclick = () => { Views._rankPeriod = b.dataset.rp; Views.liveRankings(el); });
   },
 
   /* ---------------- MORE MENU (header ☰) ---------------- */
@@ -1728,6 +2554,9 @@ const Views = {
         ${item('#/mentors', '💫', 'AI Mentors')}
         ${item('#/companions', '🪄', 'AI Companions')}
         ${item('#/wallet', '👛', 'Wallet')}
+        ${item('#/live-rankings', '🏆', 'Live Rankings')}
+        ${App.user ? item('#/companion', '🐾', 'My Companion') : ''}
+        ${App.user ? item('#/notifications', '🔔', 'Notifications') : ''}
         ${App.user ? item('#/missions', '🎯', 'Weekly Missions') : ''}
         ${Views._discCache && Views._discCache.servers && Views._discCache.servers.length ? `<button id="mmServers"><span class="mi">🕯️</span>My Servers</button>` : ''}
         ${Views._discCache && Views._discCache.discoveries && Views._discCache.discoveries.includes('hall-of-fame') ? item('#/hall-of-fame', '🏆', 'Hall of Fame') : ''}
@@ -2067,6 +2896,15 @@ const Views = {
       });
       el.querySelectorAll('[data-call-kind]').forEach(b => b.onclick = () =>
         CallUI.start(parseInt(b.dataset.callUser), b.dataset.callKind, b.dataset.callName));
+      el.querySelectorAll('[data-family-make]').forEach(b => b.onclick = async () => {
+        try { await API.post(`/friends/${b.dataset.familyMake}/family`, { family: true }); toast('You’re family now 👨‍👩‍👧'); rerun(); }
+        catch (e) { toast(e.data?.message || e.data?.error || 'Family unlocks at Best Friends (90 days)'); }
+      });
+      el.querySelectorAll('[data-family-remove]').forEach(b => b.onclick = async () => {
+        if (!confirm('Remove Family status? You stay Best Friends.')) return;
+        try { await API.post(`/friends/${b.dataset.familyRemove}/family`, { family: false }); toast('Back to Best Friends ⭐'); rerun(); }
+        catch (e) { toast(e.data?.error || 'Could not update'); }
+      });
       const doSearch = async () => {
         const q = document.getElementById('friendSearch').value.trim();
         const box = document.getElementById('friendResults');
@@ -2101,13 +2939,14 @@ const Views = {
       el.innerHTML = `
         <div class="card chat-head">
           <a class="btn small ghost" href="#/friends">←</a>${avatarHtml(friend, 44)}
-          <div class="grow"><div class="name">${esc(friend.display_name)} ${badgesHtml(friend)}</div>
-          <div>${tierChip(data.tier)} <span class="muted">@${esc(friend.username)}</span></div></div>
+          <div class="grow"><div class="name">${esc(friend.display_name)} ${badgesHtml(friend)} <span id="chatStreak"></span></div>
+          <div>${tierChip(data.tier)} ${presenceDotHtml(friend, true)} <span class="muted">@${esc(friend.username)}</span></div></div>
           <button class="btn small" id="chatCallAudio">📞</button>
           <button class="btn small" id="chatCallVideo">🎥</button>
         </div>
+        <div class="card streak-panel" id="streakPanel"><div class="muted">Loading your streak…</div></div>
         <div class="card chat-box" id="chatBox">${data.messages.length ? data.messages.map(msgHtml).join('') : `<div class="muted center">No messages yet — say hi! 👋</div>`}</div>
-        <div class="card chat-input-row"><input id="chatInput" placeholder="Message ${esc(friend.display_name)}…"><button class="btn" id="chatSend">Send</button></div>`;
+        <div class="card chat-input-row"><button class="btn small ghost" id="chatCam" title="Send a live photo with filters">📸 Live photo</button><input id="chatInput" placeholder="Message ${esc(friend.display_name)}…"><button class="btn" id="chatSend">Send</button></div>`;
       const box = document.getElementById('chatBox');
       box.scrollTop = box.scrollHeight;
       const refresh = async () => {
@@ -2125,13 +2964,71 @@ const Views = {
         const v = inp.value.trim();
         if (!v) return;
         inp.value = '';
-        try { await API.post(`/dm/${userId}`, { content: v }); await refresh(); const b3 = document.getElementById('chatBox'); if (b3) b3.scrollTop = b3.scrollHeight; }
+        try { await API.post(`/dm/${userId}`, { content: v }); await refresh(); const b3 = document.getElementById('chatBox'); if (b3) b3.scrollTop = b3.scrollHeight; renderStreak(); }
         catch (e) { toast(e.data?.error || 'Could not send'); }
       };
       document.getElementById('chatSend').onclick = send;
       document.getElementById('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
       document.getElementById('chatCallAudio').onclick = () => CallUI.start(userId, 'audio', friend.display_name);
       document.getElementById('chatCallVideo').onclick = () => CallUI.start(userId, 'video', friend.display_name);
+      document.getElementById('chatCam').onclick = () => CameraUI.open({
+        onCapture: async (file) => {
+          try {
+            const fd = new FormData();
+            fd.append('image', file);
+            await API.upload(`/dm/${userId}`, fd);
+            await refresh();
+            const b3 = document.getElementById('chatBox');
+            if (b3) b3.scrollTop = b3.scrollHeight;
+            renderStreak();
+          } catch (e) { toast(e.data?.error || 'Could not send photo'); }
+        },
+      });
+      /* ---- streak panel ---- */
+      const STREAK_EMOJI_SET = ['🔥', '⚡', '❤️', '💎', '⭐', '🌙', '🎮', '✝️', '💜', '✨'];
+      const renderStreak = async () => {
+        const panel = document.getElementById('streakPanel');
+        if (!panel) return;
+        let s;
+        try { s = await API.get(`/messages/${userId}/streak`); }
+        catch (e) { panel.innerHTML = `<div class="muted">Streak unavailable right now.</div>`; return; }
+        (s.rewards || []).forEach(r => toast(`${s.emoji} ${r.milestone}-day streak! +${r.coins} coins each 🎉`));
+        const chip = document.getElementById('chatStreak');
+        if (chip) chip.innerHTML = streakChipHtml(s);
+        const ch = s.challenge || {};
+        const meConfirmed = (ch.confirmed_by || []).includes(App.user.id);
+        const otherConfirmed = (ch.confirmed_by || []).some(id => id !== App.user.id);
+        let challengeHtml;
+        if (ch.completed) challengeHtml = `<div class="streak-done">✓ Today's challenge complete — today is secured!</div>`;
+        else if (ch.measurable) challengeHtml = `<div class="muted">${esc(ch.progress?.label || '')}</div><button class="btn small mt" id="streakConfirm">We did it ✓</button>`;
+        else if (meConfirmed) challengeHtml = `<div class="muted">You confirmed ✓ — waiting for ${esc(friend.display_name)} to tap too…</div>`;
+        else challengeHtml = `<button class="btn small" id="streakConfirm">We did it ✓</button>${otherConfirmed ? `<div class="muted mt">${esc(friend.display_name)} already confirmed — your tap completes it!</div>` : ''}`;
+        panel.innerHTML = `
+          <div class="row"><b>${s.emoji} Streak</b><span class="grow"></span>
+            <span>${s.emoji} <b>${s.current}</b> day${s.current === 1 ? '' : 's'} · longest ${s.longest}</span></div>
+          ${s.at_risk ? `<div class="streak-risk">⏳ At risk — keep the streak alive before midnight!</div>` : ''}
+          ${!s.today_secured && !ch.completed ? `<div class="muted mt">Message each other today (or finish the challenge) to secure day ${s.current + 1}.</div>` : ''}
+          <div class="mt"><div class="muted">Today's duo challenge</div><b>${esc(ch.title || '')}</b>
+            <div class="mt">${challengeHtml}</div></div>
+          <div class="mt"><div class="muted">Your streak emoji</div>
+            <div class="emoji-row">${STREAK_EMOJI_SET.map(e => `<button class="emoji-pick${e === s.emoji ? ' active' : ''}" data-emoji="${e}">${e}</button>`).join('')}</div></div>
+          ${s.timeline && s.timeline.length ? `<div class="mt"><div class="muted">Timeline</div>${s.timeline.map(t => `<div class="streak-tl"><span>${esc(t.day)}</span> ${esc(t.label)}</div>`).join('')}</div>` : ''}`;
+        const confirmBtn = document.getElementById('streakConfirm');
+        if (confirmBtn) confirmBtn.onclick = async () => {
+          confirmBtn.disabled = true;
+          try {
+            const r = await API.post(`/messages/${userId}/streak/challenge/confirm`, {});
+            (r.rewards || []).forEach(x => toast(`${r.emoji} ${x.milestone}-day streak! +${x.coins} coins each 🎉`));
+            if (r.challenge?.completed) toast('Challenge complete — today is secured! ✓');
+            renderStreak();
+          } catch (e) { toast(e.data?.error || 'Could not confirm'); confirmBtn.disabled = false; }
+        };
+        panel.querySelectorAll('[data-emoji]').forEach(b => b.onclick = async () => {
+          try { await API.post(`/messages/${userId}/streak/emoji`, { emoji: b.dataset.emoji }); renderStreak(); }
+          catch (e) { toast('Could not change emoji'); }
+        });
+      };
+      renderStreak();
       if (window._chatTimer) clearInterval(window._chatTimer);
       window._chatTimer = setInterval(refresh, 3000);
     } catch (e) {
