@@ -87,6 +87,29 @@ const API = {
     return result || { aiConfigured: true, reply: null };
   },
 
+  // Upload with progress (XHR — fetch has no upload progress events).
+  // Same /api prefix, auth header and error shape as req().
+  uploadProgress(path, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api' + path);
+      if (API.token) xhr.setRequestHeader('Authorization', 'Bearer ' + API.token);
+      if (xhr.upload && onProgress) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = () => {
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-json */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else {
+          const err = new Error((data && data.error) || 'Request failed');
+          err.status = xhr.status; err.data = data;
+          reject(err);
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(formData);
+    });
+  },
+
   get: (p) => API.req('GET', p),
   post: (p, b, timeoutMs) => API.req('POST', p, b, false, timeoutMs || 0),
   patch: (p, b) => API.req('PATCH', p, b),
