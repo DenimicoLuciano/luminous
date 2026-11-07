@@ -12,9 +12,13 @@ const App = {
     // saved accent color re-themes buttons/rings/highlights via CSS variables
     if (typeof Appearance !== 'undefined') Appearance.initAccent();
 
-    document.getElementById('fab').onclick = () => location.hash = '#/create';
+    document.getElementById('fab').onclick = () => { if (this.user) Views.createMenu(); else location.hash = '#/create'; };
     const moreBtn = document.getElementById('moreBtn');
     if (moreBtn) moreBtn.onclick = () => Views.moreMenu();
+    const bellBtn = document.getElementById('bellBtn');
+    if (bellBtn) bellBtn.onclick = () => { if (this.user) location.hash = '#/notifications'; else Views.authModal(); };
+    // notification badge: refresh on an easygoing cadence while signed in
+    setInterval(() => { if (this.user && API.token) this.refreshBell(); }, 30000);
 
     if (API.token) await this.refreshAuth().catch(() => API.setToken(null));
     this.renderNav();
@@ -36,6 +40,20 @@ const App = {
     const { user, wallet, milestones } = await API.get('/auth/me');
     this.user = user; this.wallet = wallet; this.milestones = milestones;
     this.renderNav();
+    this.refreshBell();
+  },
+
+  async refreshBell() {
+    const btn = document.getElementById('bellBtn');
+    const badge = document.getElementById('bellBadge');
+    if (!btn || !badge) return;
+    if (!this.user) { btn.classList.add('hidden'); return; }
+    btn.classList.remove('hidden');
+    try {
+      const { unread } = await API.get('/notifications');
+      badge.textContent = unread > 99 ? '99+' : String(unread);
+      badge.classList.toggle('hidden', !unread);
+    } catch (e) { /* badge is best-effort */ }
   },
 
   async checkMilestones() {
@@ -72,6 +90,8 @@ const App = {
     };
     document.getElementById('navpill').innerHTML = items.map(([h, e, l, cls]) =>
       `<a href="${h}" class="${cls}${isActive(h) ? ' active' : ''}"><span class="e">${e}</span>${l}</a>`).join('');
+    const createLink = document.querySelector('#navpill a.nav-create');
+    if (createLink) createLink.onclick = (e) => { if (this.user) { e.preventDefault(); Views.createMenu(); } };
     document.getElementById('fab').classList.toggle('hidden', !this.user);
 
     const area = document.getElementById('authArea');
@@ -94,7 +114,7 @@ const App = {
     window.scrollTo(0, 0);
     // per-screen custom background (Appearance feature, localStorage only)
     if (typeof Appearance !== 'undefined') Appearance.applyForHash(hash);
-    const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat', '#/missions', '#/servers', '#/hall-of-fame'];
+    const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat', '#/missions', '#/servers', '#/hall-of-fame', '#/notifications', '#/companion'];
     if (!this.user && needAuth.some(p => hash === p || hash.startsWith(p + '/'))) {
       el.innerHTML = `<div class="card center"><h3>✨ Join Luminous</h3><div class="muted">Log in or create an account to use this feature.</div>
         <div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div></div>`;
@@ -113,6 +133,7 @@ const App = {
     else if (hash === '#/stories') Views.stories(el);
     else if (hash === '#/lums') Views.lums(el);
     else if (hash === '#/live') Views.live(el);
+    else if (hash === '#/live-rankings') Views.liveRankings(el);
     else if (hash.startsWith('#/live/')) Views.liveRoom(el, hash.split('/')[2]);
     else if (hash === '#/mentors') Views.mentors(el);
     else if (hash.startsWith('#/mentors/')) Views.mentorChat(el, hash.split('/')[2]);
@@ -125,6 +146,8 @@ const App = {
     else if (hash === '#/hall-of-fame') Views.hallOfFame(el);
     else if (hash.startsWith('#/servers/')) Views.server(el, hash.split('/')[2]);
     else if (hash === '#/create') Views.create(el);
+    else if (hash === '#/notifications') Views.notifications(el);
+    else if (hash === '#/companion') Views.myCompanion(el);
     else if (hash === '#/admin') Views.admin(el);
     else Views.feed(el);
   },
