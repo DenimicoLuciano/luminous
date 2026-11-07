@@ -255,6 +255,80 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_friend_pair ON friendships(requester_id, addressee_id);
 CREATE INDEX IF NOT EXISTS idx_dm_pair ON dm_messages(sender_id, recipient_id);
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id, status);
+CREATE TABLE IF NOT EXISTS follows (
+  follower_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  followee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (follower_id, followee_id)
+);
+CREATE TABLE IF NOT EXISTS servers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  tagline TEXT DEFAULT '',
+  emoji TEXT DEFAULT '🕯️',
+  hint TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS server_members (
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'member',
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (server_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS server_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS user_discoveries (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, key)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,                            -- mystery | treasure
+  month TEXT NOT NULL,                           -- 'YYYY-MM'
+  title TEXT NOT NULL,
+  intro TEXT DEFAULT '',
+  payload TEXT DEFAULT '{}',                     -- client-safe content ONLY (answers never stored here)
+  winner_user_id INTEGER REFERENCES users(id),
+  solved_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (kind, month)
+);
+CREATE TABLE IF NOT EXISTS event_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  guess TEXT DEFAULT '',
+  correct INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS event_progress (
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  clues_seen INTEGER NOT NULL DEFAULT 0,         -- mystery: clues revealed
+  step INTEGER NOT NULL DEFAULT 0,               -- treasure: riddles answered
+  PRIMARY KEY (event_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS mission_progress (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  week TEXT NOT NULL,                            -- ISO week 'YYYY-Www'
+  mission_key TEXT NOT NULL,
+  progress INTEGER NOT NULL DEFAULT 0,
+  claimed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, week, mission_key)
+);
+CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id);
+CREATE INDEX IF NOT EXISTS idx_smsg_server ON server_messages(server_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_month ON events(month);
+CREATE INDEX IF NOT EXISTS idx_eattempts_event ON event_attempts(event_id, user_id);
 `;
 db.exec(SCHEMA);
 
@@ -269,6 +343,13 @@ if (!userCols.includes('role')) {
 }
 if (!userCols.includes('lumiail_address')) {
   db.exec("ALTER TABLE users ADD COLUMN lumiail_address TEXT");
+}
+// payout_count: per-stream payout sequence, so each live-withdraw payout
+// gets a UNIQUE LumiCoin Core idempotency key (a repeated withdraw on the
+// same stream must never look like a replay of the first one).
+const streamCols = db.prepare('PRAGMA table_info(live_streams)').all().map(c => c.name);
+if (streamCols.length && !streamCols.includes('payout_count')) {
+  db.exec("ALTER TABLE live_streams ADD COLUMN payout_count INTEGER NOT NULL DEFAULT 0");
 }
 
 // ---- Milestones (11) ----
@@ -556,6 +637,31 @@ try {
   }, 45 * 60 * 1000);
   if (aiTimer.unref) aiTimer.unref();
 } catch (e) { /* activity is best-effort */ }
+
+// ---- Mystery pack: hidden LumiServers (seeded, insert-if-missing) ----
+// These servers are NEVER listed in any directory — players find them
+// through secret passages in the UI (see server.js PASSAGES map).
+const HIDDEN_SERVERS = [
+  ['the-vault', 'The Vault', 'Founder announcements & secrets', '🔐', "Somewhere beneath the Vault's name, fame sleeps."],
+  ['midnight-library', 'The Midnight Library', 'Stories & creators', '📚', 'Gamers gather where your own face looks back at you.'],
+  ['the-back-room', 'The Back Room', 'Gamers', '🎮', 'A star burns over the river of stories.'],
+];
+const insServer = db.prepare('INSERT OR IGNORE INTO servers (slug, name, tagline, emoji, hint) VALUES (?,?,?,?,?)');
+for (const s of HIDDEN_SERVERS) insServer.run(...s);
+
+// ---- Founder follows: every AI demo account (is_ai = 1, the same flag the
+// rest of the app uses to badge them "🤖 AI demo account") follows the
+// founder/developer account. REAL follow rows — the founder's follower
+// count is the true COUNT(*) of these rows, never a hardcoded number.
+try {
+  const DEV_EMAIL = (process.env.DEVELOPER_EMAIL || 'denimdenimdenim00@gmail.com').toLowerCase();
+  const founderRow = db.prepare("SELECT id FROM users WHERE role = 'developer' OR lower(email) = ? ORDER BY id LIMIT 1").get(DEV_EMAIL);
+  if (founderRow) {
+    const demoRows = db.prepare('SELECT id FROM users WHERE is_ai = 1 AND id != ?').all(founderRow.id);
+    const insFollow = db.prepare('INSERT OR IGNORE INTO follows (follower_id, followee_id) VALUES (?,?)');
+    for (const d of demoRows) insFollow.run(d.id, founderRow.id);
+  }
+} catch (e) { /* founder follows are best-effort */ }
 
 module.exports = db;
 module.exports.DATA_DIR = DATA_DIR;
