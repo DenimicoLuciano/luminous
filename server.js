@@ -8,6 +8,7 @@ const multer = require('multer');
 const cors = require('cors');
 const db = require('./db');
 const lumicoin = require('./lumicoin');
+const eventsContent = require('./events-content');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -241,6 +242,116 @@ function ensureWallet(userId) {
   db.prepare('INSERT OR IGNORE INTO wallets (user_id) VALUES (?)').run(userId);
 }
 
+// ---------- Mystery pack: follows + trophies ----------
+// HONESTY RULE: follower numbers are ALWAYS live COUNT(*)s from the follows
+// table. Nothing anywhere hardcodes or inflates a follower count.
+function followerCount(userId) {
+  return db.prepare('SELECT COUNT(*) c FROM follows WHERE followee_id = ?').get(userId).c;
+}
+function followingCount(userId) {
+  return db.prepare('SELECT COUNT(*) c FROM follows WHERE follower_id = ?').get(userId).c;
+}
+const TROPHY_DEFS = [
+  { key: 'first-thousand', name: 'First Thousand', icon: '🥉', threshold: 1000 },
+  { key: 'six-figures', name: 'Six Figures', icon: '🥈', threshold: 100000 },
+  { key: 'million-club', name: 'Million Club', icon: '🥇', threshold: 1000000 },
+];
+// Trophies are computed from real data: milestone trophies from the real
+// follower count, event trophies from real Monthly Quest wins, and the
+// Founder trophy from the developer identity the tree already recognizes.
+function trophiesFor(u) {
+  const fc = followerCount(u.id);
+  const list = TROPHY_DEFS.map(t => ({ ...t, unlocked: fc >= t.threshold }));
+  if (isDeveloper(u)) list.unshift({ key: 'founder', name: 'The Founder', icon: '🏆', threshold: null, unlocked: true });
+  const won = (kind) => !!db.prepare('SELECT 1 FROM events WHERE winner_user_id = ? AND kind = ? LIMIT 1').get(u.id, kind);
+  list.push({ key: 'mystery-winner', name: 'Mystery Solver', icon: '🔎', threshold: null, unlocked: won('mystery') });
+  list.push({ key: 'treasure-winner', name: 'Treasure Hunter', icon: '🗺️', threshold: null, unlocked: won('treasure') });
+  return list;
+}
+function profileExtras(u, viewer) {
+  return {
+    follower_count: followerCount(u.id),
+    following_count: followingCount(u.id),
+    is_following: !!(viewer && viewer.id !== u.id &&
+      db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(viewer.id, u.id)),
+    trophies: trophiesFor(u),
+  };
+}
+function enrichUser(u, viewer) {
+  if (!u) return null;
+  return { ...publicUser(u), ...profileExtras(u, viewer || null) };
+}
+
+// ---------- Weekly missions ----------
+const MISSIONS = [
+  { key: 'post-3', title: 'Post 3 times', target: 3, reward: 30 },
+  { key: 'lum-1', title: 'Post a Lum', target: 1, reward: 25 },
+  { key: 'story-1', title: 'Share a Story', target: 1, reward: 15 },
+  { key: 'follow-5', title: 'Follow 5 creators', target: 5, reward: 20 },
+  { key: 'server-msg-10', title: 'Send 10 messages in a LumiServer', target: 10, reward: 20 },
+  { key: 'join-server', title: 'Find & join a hidden LumiServer', target: 1, reward: 40 },
+  { key: 'gift-1', title: 'Send a gift in a live room', target: 1, reward: 30 },
+  { key: 'golive-1', title: 'Go live once', target: 1, reward: 50 },
+];
+// ISO week key 'YYYY-Www' (UTC). Rows are keyed by week, so a new week
+// simply starts everyone fresh — no reset job.
+function isoWeekKey(date = new Date()) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNum = (d.getUTCDay() + 6) % 7;               // Mon = 0 … Sun = 6
+  d.setUTCDate(d.getUTCDate() - dayNum + 3);            // Thursday of this week
+  const firstThu = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const fDay = (firstThu.getUTCDay() + 6) % 7;
+  firstThu.setUTCDate(firstThu.getUTCDate() - fDay + 3);
+  const week = 1 + Math.round((d - firstThu) / (7 * 864e5));
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+// Best-effort progress bump: a mission failure must NEVER break the action.
+function bumpMission(userId, key, n = 1) {
+  try {
+    db.prepare(`INSERT INTO mission_progress (user_id, week, mission_key, progress) VALUES (?,?,?,?)
+      ON CONFLICT(user_id, week, mission_key) DO UPDATE SET progress = progress + excluded.progress`)
+      .run(userId, isoWeekKey(), key, n);
+  } catch (e) { /* missions are best-effort */ }
+}
+// Mission reward credit — the same unified-ledger-first pattern as
+// creditHostPayout: a Core 'earn' when the user is Lumiail-linked, else the
+// local wallet. Mutually exclusive; returns the balance or null.
+async function creditMissionReward(user, amount, missionKey, week) {
+  if (amount > 0 && lumicoin.enabled() && user.lumiail_address) {
+    const r = await lumicoin.postTransaction({
+      lumiail_address: user.lumiail_address,
+      kind: 'earn',
+      amount,
+      note: `Weekly mission reward: ${missionKey}`,
+      idempotency_key: `mission-${week}-${missionKey}`,
+    });
+    if (r) return r.wallet ? r.wallet.balance : null;
+  }
+  ensureWallet(user.id);
+  db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(amount, user.id);
+  const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(user.id);
+  return w ? w.coins : null;
+}
+
+// ---------- Monthly quest events: seed rows from authored content ----------
+// Only authored months get rows; a month with no content entry reads as the
+// honest "being written" state. Answers are NEVER stored in the DB: rows
+// carry the client-safe payload built by events-content.js, and solutions
+// stay in that server-side module only.
+try {
+  const insEvent = db.prepare('INSERT OR IGNORE INTO events (kind, month, title, intro, payload) VALUES (?,?,?,?,?)');
+  for (const [month, pair] of Object.entries(eventsContent.CONTENT)) {
+    for (const kind of ['mystery', 'treasure']) {
+      const entry = pair[kind];
+      if (entry) insEvent.run(kind, month, entry.title, entry.intro, JSON.stringify(eventsContent.clientPayload(kind, entry)));
+    }
+  }
+} catch (e) { console.error('event seed', e); }
+function currentMonth() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
 // ---------- auth ----------
 function authRequired(req, res, next) {
   const h = req.headers.authorization || '';
@@ -292,7 +403,7 @@ app.post('/api/auth/register', (req, res) => {
   ensureWallet(r.lastInsertRowid);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions (token, user_id) VALUES (?,?)').run(token, r.lastInsertRowid);
-  res.json({ token, user: publicUser(getUserById.get(r.lastInsertRowid)) });
+  res.json({ token, user: enrichUser(getUserById.get(r.lastInsertRowid), null) });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -303,7 +414,7 @@ app.post('/api/auth/login', (req, res) => {
   ensureDeveloperRole(u);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions (token, user_id) VALUES (?,?)').run(token, u.id);
-  res.json({ token, user: publicUser(getUserById.get(u.id)) });
+  res.json({ token, user: enrichUser(getUserById.get(u.id), null) });
 });
 
 // Sign in with Lumiail (Lumiworld single sign-on): the Lumiail password is
@@ -352,7 +463,7 @@ app.post('/api/auth/lumiail', async (req, res) => {
   ensureDeveloperRole(u);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions (token, user_id) VALUES (?,?)').run(token, u.id);
-  res.json({ token, user: publicUser(getUserById.get(u.id)) });
+  res.json({ token, user: enrichUser(getUserById.get(u.id), null) });
 });
 
 app.post('/api/auth/logout', authRequired, (req, res) => {
@@ -400,7 +511,7 @@ app.get('/api/auth/me', authRequired, (req, res) => {
       um.unlocked_at IS NOT NULL AS unlocked
     FROM milestones m LEFT JOIN user_milestones um
       ON um.milestone_id = m.id AND um.user_id = ?`).all(req.user.id);
-  res.json({ user: publicUser(getUserById.get(req.user.id)), wallet, milestones });
+  res.json({ user: enrichUser(getUserById.get(req.user.id), req.user), wallet, milestones });
 });
 
 // ---------- posts / feed ----------
@@ -436,6 +547,7 @@ app.post('/api/posts', authRequired, upload.single('image'), (req, res) => {
     .run(req.user.id, type, content, image_url);
   addXp(req.user.id, 10);
   unlockMilestone(req.user.id, 'first-post');
+  bumpMission(req.user.id, 'post-3');
   const count = db.prepare('SELECT COUNT(*) c FROM posts WHERE user_id = ? AND is_ad = 0').get(req.user.id).c;
   if (count >= 10) unlockMilestone(req.user.id, 'prolific');
   res.json({ ok: true, id: r.lastInsertRowid });
@@ -535,6 +647,7 @@ app.post('/api/stories', authRequired, upload.single('image'), (req, res) => {
     VALUES (?,?,?,datetime('now','+24 hours'))`).run(req.user.id, image_url, text);
   addXp(req.user.id, 5);
   unlockMilestone(req.user.id, 'first-story');
+  bumpMission(req.user.id, 'story-1');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
@@ -586,6 +699,7 @@ app.post('/api/lums', authRequired, upload.single('video'), (req, res) => {
     .run(req.user.id, video_url, caption);
   addXp(req.user.id, 10);
   unlockMilestone(req.user.id, 'first-lum');
+  bumpMission(req.user.id, 'lum-1');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
@@ -772,6 +886,7 @@ app.post('/api/live/start', authRequired, (req, res) => {
     VALUES (?, ?, 'host', 'joined', datetime('now'), datetime('now'))`).run(r.lastInsertRowid, req.user.id);
   addXp(req.user.id, 15);
   unlockMilestone(req.user.id, 'going-live');
+  bumpMission(req.user.id, 'golive-1');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
@@ -898,13 +1013,14 @@ app.post('/api/live/:id/gift', authRequired, async (req, res) => {
         note: note || 'Luminous live gift',
         idempotency_key: `gift-${ev.lastInsertRowid}`,
       });
-      if (purchase) return res.json({ ok: true, coins });
+      if (purchase) { bumpMission(req.user.id, 'gift-1'); return res.json({ ok: true, coins }); }
       // Core transfer failed after the event was recorded: fall back to the
       // local debit if it can cover the gift; otherwise roll the event and
       // the stream accounting back so nothing is recorded as unpaid.
       const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(req.user.id);
       if (w.coins >= coins) {
         db.prepare('UPDATE wallets SET coins = coins - ? WHERE user_id = ?').run(coins, req.user.id);
+        bumpMission(req.user.id, 'gift-1');
         return res.json({ ok: true, coins });
       }
       db.prepare('DELETE FROM live_events WHERE id = ?').run(ev.lastInsertRowid);
@@ -918,6 +1034,7 @@ app.post('/api/live/:id/gift', authRequired, async (req, res) => {
   addStreamCoins(s.id, coins);
   db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,?,?)')
     .run(s.id, req.user.id, 'gift', coins, note);
+  bumpMission(req.user.id, 'gift-1');
   res.json({ ok: true, coins });
 });
 
@@ -1301,7 +1418,7 @@ app.get('/api/users/:username', optionalAuth, (req, res) => {
   const lums = db.prepare('SELECT * FROM lums WHERE user_id = ? ORDER BY created_at DESC LIMIT 12').all(u.id);
   const milestones = db.prepare(`SELECT m.key, m.name FROM milestones m
     JOIN user_milestones um ON um.milestone_id = m.id WHERE um.user_id = ?`).all(u.id);
-  res.json({ user: publicUser(u), posts, lums, milestones, isOwn: !!req.user && req.user.id === u.id });
+  res.json({ user: enrichUser(u, req.user), posts, lums, milestones, isOwn: !!req.user && req.user.id === u.id });
 });
 
 app.patch('/api/profile', authRequired, (req, res) => {
@@ -1580,6 +1697,280 @@ app.post('/api/calls/:id/end', authRequired, (req, res) => {
     return res.status(404).json({ error: 'Call not found' });
   db.prepare("UPDATE calls SET status = 'ended', ended_at = datetime('now') WHERE id = ?").run(c.id);
   res.json({ ok: true });
+});
+
+// ---------- follows ----------
+app.post('/api/users/:id/follow', authRequired, (req, res) => {
+  const target = getUserById.get(parseInt(req.params.id));
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot follow yourself' });
+  const r = db.prepare('INSERT OR IGNORE INTO follows (follower_id, followee_id) VALUES (?,?)').run(req.user.id, target.id);
+  if (r.changes) bumpMission(req.user.id, 'follow-5');
+  res.json({ ok: true, following: true, follower_count: followerCount(target.id) });
+});
+app.post('/api/users/:id/unfollow', authRequired, (req, res) => {
+  const target = getUserById.get(parseInt(req.params.id));
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(req.user.id, target.id);
+  res.json({ ok: true, following: false, follower_count: followerCount(target.id) });
+});
+
+// ---------- Mystery pack: hidden LumiServers ----------
+// Servers are never listed anywhere. The only way in is a secret passage:
+// the client sends a passage key, and this fixed server-side map decides
+// what (if anything) glimmers back.
+const PASSAGES = {
+  'home-star': 'the-vault',
+  'discover-star': 'midnight-library',
+  'profile-star': 'the-back-room',
+  'fame-star': 'hall-of-fame',
+};
+function serverView(s, userId) {
+  const mc = db.prepare('SELECT COUNT(*) c FROM server_members WHERE server_id = ?').get(s.id).c;
+  const mine = userId ? db.prepare('SELECT role FROM server_members WHERE server_id = ? AND user_id = ?').get(s.id, userId) : null;
+  return {
+    id: s.id, slug: s.slug, name: s.name, tagline: s.tagline, emoji: s.emoji, hint: s.hint,
+    member_count: mc, joined: !!mine, role: mine ? mine.role : null,
+  };
+}
+app.get('/api/servers/mine', authRequired, (req, res) => {
+  const rows = db.prepare(`SELECT s.* FROM servers s JOIN server_members m ON m.server_id = s.id
+    WHERE m.user_id = ? ORDER BY s.id`).all(req.user.id);
+  const discoveries = db.prepare('SELECT key FROM user_discoveries WHERE user_id = ?').all(req.user.id).map(r => r.key);
+  res.json({ servers: rows.map(s => serverView(s, req.user.id)), discoveries });
+});
+app.post('/api/servers/discover', authRequired, (req, res) => {
+  const target = PASSAGES[String((req.body || {}).passage || '')];
+  if (!target) return res.status(404).json({ error: 'Nothing glimmers here.' });
+  if (target === 'hall-of-fame') {
+    db.prepare('INSERT OR IGNORE INTO user_discoveries (user_id, key) VALUES (?,?)').run(req.user.id, 'hall-of-fame');
+    return res.json({ found: 'hall-of-fame' });
+  }
+  const s = db.prepare('SELECT * FROM servers WHERE slug = ?').get(target);
+  if (!s) return res.status(404).json({ error: 'Nothing glimmers here.' });
+  db.prepare('INSERT OR IGNORE INTO user_discoveries (user_id, key) VALUES (?,?)').run(req.user.id, 'server:' + s.slug);
+  const v = serverView(s, req.user.id);
+  // Discovering shows a preview only — it never auto-joins.
+  res.json({ found: 'server', server: { id: v.id, slug: v.slug, name: v.name, tagline: v.tagline, emoji: v.emoji, member_count: v.member_count, joined: v.joined } });
+});
+app.post('/api/servers/:id/join', authRequired, (req, res) => {
+  const s = db.prepare('SELECT * FROM servers WHERE id = ?').get(parseInt(req.params.id));
+  if (!s) return res.status(404).json({ error: 'Server not found' });
+  const was = db.prepare('SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ?').get(s.id, req.user.id);
+  db.prepare('INSERT OR IGNORE INTO server_members (server_id, user_id) VALUES (?,?)').run(s.id, req.user.id);
+  if (!was) bumpMission(req.user.id, 'join-server');
+  res.json({ ok: true, server: serverView(s, req.user.id) });
+});
+function requireMember(req, res) {
+  const s = db.prepare('SELECT * FROM servers WHERE id = ?').get(parseInt(req.params.id));
+  if (!s) { res.status(404).json({ error: 'Server not found' }); return null; }
+  const m = db.prepare('SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ?').get(s.id, req.user.id);
+  if (!m) { res.status(403).json({ error: 'You have not found your way into this place yet.' }); return null; }
+  return s;
+}
+app.get('/api/servers/:id/messages', authRequired, (req, res) => {
+  const s = requireMember(req, res); if (!s) return;
+  const rows = db.prepare(`SELECT sm.id, sm.text, sm.created_at, sm.user_id,
+      u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role, u.email AS author_email
+    FROM server_messages sm JOIN users u ON u.id = sm.user_id
+    WHERE sm.server_id = ? ORDER BY sm.id DESC LIMIT 100`).all(s.id).reverse();
+  res.json({
+    server: serverView(s, req.user.id),
+    messages: rows.map(m => ({
+      id: m.id, text: m.text, created_at: m.created_at,
+      author: {
+        id: m.user_id, username: m.username, display_name: m.display_name,
+        avatar_emoji: m.avatar_emoji, is_ai: !!m.is_ai,
+        is_developer: m.role === 'developer' || isDeveloperEmail(m.author_email),
+      },
+    })),
+  });
+});
+app.post('/api/servers/:id/messages', authRequired, (req, res) => {
+  const s = requireMember(req, res); if (!s) return;
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  if (!text) return res.status(400).json({ error: 'Message is empty' });
+  const r = db.prepare('INSERT INTO server_messages (server_id, user_id, text) VALUES (?,?,?)').run(s.id, req.user.id, text);
+  bumpMission(req.user.id, 'server-msg-10');
+  res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+// ---------- Hall of Fame ----------
+app.get('/api/hall-of-fame', authRequired, (req, res) => {
+  const founder = db.prepare("SELECT * FROM users WHERE role = 'developer' OR lower(email) = ? ORDER BY id LIMIT 1").get(DEVELOPER_EMAIL);
+  const entryFor = (u, title) => ({
+    user: publicUser(u),
+    title,
+    follower_count: followerCount(u.id),
+    trophies: trophiesFor(u).filter(t => t.unlocked).map(t => ({ key: t.key, name: t.name, icon: t.icon })),
+  });
+  const entries = [];
+  if (founder) entries.push(entryFor(founder, 'Founder & Developer'));
+  const legends = db.prepare('SELECT * FROM users').all()
+    .filter(u => !founder || u.id !== founder.id)
+    .map(u => ({ u, fc: followerCount(u.id), milestoneWins: trophiesFor(u).filter(t => t.unlocked && t.threshold) }))
+    .filter(x => x.milestoneWins.length > 0)
+    .sort((a, b) => b.fc - a.fc)
+    .map(x => entryFor(x.u, 'Legend of Luminous'));
+  entries.push(...legends);
+  // Engraved winners: Monthly Quest champions, permanently on the wall.
+  const winners = db.prepare(`SELECT e.kind, e.title, e.month, u.display_name AS winner
+    FROM events e JOIN users u ON u.id = e.winner_user_id
+    WHERE e.winner_user_id IS NOT NULL
+    ORDER BY e.solved_at DESC,
+      (SELECT MAX(ea.id) FROM event_attempts ea WHERE ea.event_id = e.id AND ea.correct = 1) DESC`).all();
+  res.json({ entries, winners, awaiting_first_legend: legends.length === 0 });
+});
+
+// ---------- Monthly quest events ----------
+function eventProgress(eventId, userId) {
+  let p = db.prepare('SELECT * FROM event_progress WHERE event_id = ? AND user_id = ?').get(eventId, userId);
+  if (!p) {
+    db.prepare('INSERT OR IGNORE INTO event_progress (event_id, user_id) VALUES (?,?)').run(eventId, userId);
+    p = db.prepare('SELECT * FROM event_progress WHERE event_id = ? AND user_id = ?').get(eventId, userId);
+  }
+  return p;
+}
+// Client view of an event: story material + the viewer's own progress ONLY.
+// Riddles/clues are revealed progressively; answers are never included.
+function eventView(ev, user) {
+  const payload = safeJson(ev.payload, {});
+  const prog = eventProgress(ev.id, user.id);
+  const winner = ev.winner_user_id ? getUserById.get(ev.winner_user_id) : null;
+  const myAttempts = db.prepare('SELECT COUNT(*) c FROM event_attempts WHERE event_id = ? AND user_id = ?').get(ev.id, user.id).c;
+  const base = {
+    id: ev.id, kind: ev.kind, month: ev.month, title: ev.title, intro: ev.intro,
+    state: ev.winner_user_id ? 'solved' : 'open',
+    winner: winner ? winner.display_name : null,
+    winner_is_me: !!winner && winner.id === user.id,
+    my_attempts: myAttempts,
+  };
+  if (ev.kind === 'mystery') {
+    const clues = payload.clues || [];
+    return {
+      ...base, suspects: payload.suspects || [],
+      clues_total: clues.length, clues_seen: Math.min(prog.clues_seen, clues.length),
+      clues: clues.slice(0, prog.clues_seen),
+    };
+  }
+  const steps = payload.steps || [];
+  const upto = ev.winner_user_id ? steps.length : Math.min(prog.step + 1, steps.length);
+  const riddles = [];
+  for (let i = 0; i < upto && i < steps.length; i++)
+    riddles.push({ n: i + 1, place: steps[i].place, riddle: steps[i].riddle, done: i < prog.step });
+  return { ...base, steps_total: steps.length, my_step: prog.step, riddles };
+}
+app.get('/api/events/current', authRequired, (req, res) => {
+  const month = currentMonth();
+  const out = [];
+  for (const kind of ['mystery', 'treasure']) {
+    const ev = db.prepare('SELECT * FROM events WHERE kind = ? AND month = ?').get(kind, month);
+    if (!ev) out.push({ kind, month, state: 'being-written' });
+    else out.push(eventView(ev, req.user));
+  }
+  res.json({ month, events: out });
+});
+app.post('/api/events/:id/clue', authRequired, (req, res) => {
+  const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(parseInt(req.params.id));
+  if (!ev) return res.status(404).json({ error: 'Event not found' });
+  if (ev.kind !== 'mystery') return res.status(400).json({ error: 'This quest reveals no clues — answer its riddles instead.' });
+  const payload = safeJson(ev.payload, {});
+  const total = (payload.clues || []).length;
+  const prog = eventProgress(ev.id, req.user.id);
+  const next = Math.min(prog.clues_seen + 1, total);
+  db.prepare('UPDATE event_progress SET clues_seen = ? WHERE event_id = ? AND user_id = ?').run(next, ev.id, req.user.id);
+  res.json({ ok: true, clues_seen: next, clues_total: total, clue: next > prog.clues_seen ? payload.clues[next - 1] : null });
+});
+app.post('/api/events/:id/answer', authRequired, (req, res) => {
+  const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(parseInt(req.params.id));
+  if (!ev) return res.status(404).json({ error: 'Event not found' });
+  const entry = (eventsContent.CONTENT[ev.month] || {})[ev.kind];
+  if (!entry) return res.status(400).json({ error: 'This quest is still being written.' });
+  const body = req.body || {};
+  const logAttempt = (guess, correct) =>
+    db.prepare('INSERT INTO event_attempts (event_id, user_id, guess, correct) VALUES (?,?,?,?)')
+      .run(ev.id, req.user.id, String(guess || '').slice(0, 300), correct ? 1 : 0);
+  // Atomic win claim: only lands while winner is still NULL.
+  const claimWin = () =>
+    db.prepare("UPDATE events SET winner_user_id = ?, solved_at = datetime('now') WHERE id = ? AND winner_user_id IS NULL")
+      .run(req.user.id, ev.id).changes > 0;
+  const winnerName = (row) => {
+    const w = row && row.winner_user_id ? getUserById.get(row.winner_user_id) : null;
+    return w ? w.display_name : null;
+  };
+
+  if (ev.kind === 'mystery') {
+    const payload = safeJson(ev.payload, {});
+    const total = (payload.clues || []).length;
+    const prog = eventProgress(ev.id, req.user.id);
+    if (prog.clues_seen < total)
+      return res.status(400).json({ error: 'CLUES_INCOMPLETE', message: 'Examine every clue first, detective — the accusation must fit them all.' });
+    const suspectGuess = String(body.suspect || body.guess || '');
+    const motiveGuess = String(body.motive || '');
+    const okSuspect = eventsContent.matches(suspectGuess, { anyTokens: entry.solution.suspectAnyTokens });
+    const okMotive = eventsContent.matches(motiveGuess || suspectGuess, { allTokens: entry.solution.motiveAllTokens });
+    const correct = okSuspect && okMotive;
+    logAttempt(`${suspectGuess} — ${motiveGuess}`, correct);
+    if (!correct) return res.json({ correct: false, message: 'The trail goes cold — that accusation doesn\u2019t fit the clues. Read them again, detective.' });
+    if (ev.winner_user_id) return res.json({ correct: true, already_solved: true, winner: winnerName(ev), message: `Right — but the case was already closed by ${winnerName(ev)}.` });
+    if (claimWin()) return res.json({ correct: true, winner: true, message: '🔎 Case closed! You named the informant — your name is engraved in the Hall of Fame.' });
+    const fresh = db.prepare('SELECT * FROM events WHERE id = ?').get(ev.id);
+    return res.json({ correct: true, already_solved: true, winner: winnerName(fresh), message: `Right — but the case was already closed by ${winnerName(fresh)}.` });
+  }
+
+  // Treasure hunt: riddles are sequential — you only face riddle n+1 after
+  // answering riddle n. The final step's answer is the Key phrase itself.
+  const prog = eventProgress(ev.id, req.user.id);
+  const steps = entry.steps;
+  if (prog.step >= steps.length)
+    return res.json({ correct: true, already_solved: !!ev.winner_user_id, message: 'You have already walked the whole chain of whispers.' });
+  const guess = String(body.guess || '');
+  const correct = eventsContent.matches(guess, steps[prog.step]);
+  logAttempt(guess, correct);
+  if (!correct) return res.json({ correct: false, step: prog.step, message: 'The whisper does not stir. That is not the name it listens for.' });
+  const newStep = prog.step + 1;
+  db.prepare('UPDATE event_progress SET step = ? WHERE event_id = ? AND user_id = ?').run(newStep, ev.id, req.user.id);
+  if (newStep < steps.length)
+    return res.json({ correct: true, step: newStep, final: false, message: '✨ The whisper fades — and a new one stirs, deeper in…' });
+  if (ev.winner_user_id) return res.json({ correct: true, final: true, already_solved: true, winner: winnerName(ev), message: `You spoke the Key — but another seeker turned it first: ${winnerName(ev)} is engraved in the Hall.` });
+  if (claimWin()) return res.json({ correct: true, final: true, winner: true, message: '🗝️ The Key turns! You found the Founder\u2019s Lost Key — your name is engraved in the Hall of Fame.' });
+  const fresh = db.prepare('SELECT * FROM events WHERE id = ?').get(ev.id);
+  return res.json({ correct: true, final: true, already_solved: true, winner: winnerName(fresh), message: `You spoke the Key — but another seeker turned it first: ${winnerName(fresh)} is engraved in the Hall.` });
+});
+
+// ---------- Weekly missions ----------
+app.get('/api/missions', authRequired, (req, res) => {
+  const week = isoWeekKey();
+  const rows = db.prepare('SELECT * FROM mission_progress WHERE user_id = ? AND week = ?').all(req.user.id, week);
+  const byKey = {};
+  rows.forEach(r => { byKey[r.mission_key] = r; });
+  res.json({
+    week,
+    missions: MISSIONS.map(m => {
+      const r = byKey[m.key];
+      const progress = r ? r.progress : 0;
+      return {
+        key: m.key, title: m.title, target: m.target, reward: m.reward,
+        progress: Math.min(progress, m.target), raw_progress: progress,
+        claimed: !!(r && r.claimed), complete: progress >= m.target,
+      };
+    }),
+  });
+});
+app.post('/api/missions/:key/claim', authRequired, async (req, res) => {
+  const m = MISSIONS.find(x => x.key === req.params.key);
+  if (!m) return res.status(404).json({ error: 'Mission not found' });
+  const week = isoWeekKey();
+  const row = db.prepare('SELECT * FROM mission_progress WHERE user_id = ? AND week = ? AND mission_key = ?')
+    .get(req.user.id, week, m.key);
+  if (!row || row.progress < m.target) return res.status(400).json({ error: 'Mission not complete yet' });
+  if (row.claimed) return res.status(409).json({ error: 'ALREADY_CLAIMED', message: 'Already claimed — rewards pay out once.' });
+  // Mark claimed first (guarded) so a replay can never double-credit.
+  const upd = db.prepare('UPDATE mission_progress SET claimed = 1 WHERE user_id = ? AND week = ? AND mission_key = ? AND claimed = 0')
+    .run(req.user.id, week, m.key);
+  if (!upd.changes) return res.status(409).json({ error: 'ALREADY_CLAIMED', message: 'Already claimed — rewards pay out once.' });
+  const balance = await creditMissionReward(req.user, m.reward, m.key, week);
+  res.json({ ok: true, reward: m.reward, balance });
 });
 
 // ---------- static frontend ----------
