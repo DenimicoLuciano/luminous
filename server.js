@@ -1913,7 +1913,7 @@ app.post('/api/events/:id/answer', authRequired, (req, res) => {
     logAttempt(`${suspectGuess} — ${motiveGuess}`, correct);
     if (!correct) return res.json({ correct: false, message: 'The trail goes cold — that accusation doesn\u2019t fit the clues. Read them again, detective.' });
     if (ev.winner_user_id) return res.json({ correct: true, already_solved: true, winner: winnerName(ev), message: `Right — but the case was already closed by ${winnerName(ev)}.` });
-    if (claimWin()) return res.json({ correct: true, winner: true, message: '🔎 Case closed! You named the informant — your name is engraved in the Hall of Fame.' });
+    if (claimWin()) return res.json({ correct: true, winner: true, message: entry.winBanner || '🏆 You solved it first! Your name is engraved in the Hall of Fame.' });
     const fresh = db.prepare('SELECT * FROM events WHERE id = ?').get(ev.id);
     return res.json({ correct: true, already_solved: true, winner: winnerName(fresh), message: `Right — but the case was already closed by ${winnerName(fresh)}.` });
   }
@@ -1933,7 +1933,7 @@ app.post('/api/events/:id/answer', authRequired, (req, res) => {
   if (newStep < steps.length)
     return res.json({ correct: true, step: newStep, final: false, message: '✨ The whisper fades — and a new one stirs, deeper in…' });
   if (ev.winner_user_id) return res.json({ correct: true, final: true, already_solved: true, winner: winnerName(ev), message: `You spoke the Key — but another seeker turned it first: ${winnerName(ev)} is engraved in the Hall.` });
-  if (claimWin()) return res.json({ correct: true, final: true, winner: true, message: '🗝️ The Key turns! You found the Founder\u2019s Lost Key — your name is engraved in the Hall of Fame.' });
+  if (claimWin()) return res.json({ correct: true, final: true, winner: true, message: entry.winBanner || '🏆 You solved it first! Your name is engraved in the Hall of Fame.' });
   const fresh = db.prepare('SELECT * FROM events WHERE id = ?').get(ev.id);
   return res.json({ correct: true, final: true, already_solved: true, winner: winnerName(fresh), message: `You spoke the Key — but another seeker turned it first: ${winnerName(fresh)} is engraved in the Hall.` });
 });
