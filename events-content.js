@@ -16,6 +16,7 @@ const CONTENT = {
   '2026-11': {
     mystery: {
       title: 'Bonnie & Clyde: The Informant',
+      winBanner: '🔎 Case closed! You named the informant — your name is engraved in the Hall of Fame.',
       intro:
         'May 1934. Bonnie Parker and Clyde Barrow have outrun the law across five states — ' +
         'every posse a mile behind, every roadblock an hour too late. But lately the law has ' +
@@ -94,6 +95,7 @@ const CONTENT = {
 
     treasure: {
       title: "The Founder's Lost Key",
+      winBanner: '🗝️ The Key turns! You found the Founder\u2019s Lost Key — your name is engraved in the Hall of Fame.',
       intro:
         'Somewhere inside Luminous, the Founder hid a Key — not a thing of brass, but a phrase, ' +
         'the very words this world was built for. Four whispers guard it, chained across the ' +
@@ -141,6 +143,7 @@ const CONTENT = {
   '2026-12': {
     mystery: {
       title: 'The Christmas Express: A Yuletide Whodunit',
+      winBanner: '🔎 Case closed! You unmasked the thief of the Winter Rose — your name is engraved in the Hall of Fame.',
       intro:
         'December 1954. The Yuletide Limited — the Christmas Express — is twelve hours out ' +
         'of Chicago and buried to its axles in a snowdrift outside the little town of Holly ' +
@@ -238,6 +241,7 @@ const CONTENT = {
 
     treasure: {
       title: 'The Star of the North',
+      winBanner: '⭐ The Star shines! You found the Star of the North — your name is engraved in the Hall of Fame.',
       intro:
         'Every December a star rises over Luminous that no chart has ever mapped — the Star ' +
         'of the North. It does not shine on treasure chests or thrones; it shines on whoever ' +
