@@ -1289,48 +1289,15 @@ app.get('/api/wallet', authRequired, async (req, res) => {
 });
 
 app.post('/api/wallet/payout-method', authRequired, (req, res) => {
-  const b = req.body || {};
-  const method = b.method;
-  if (!['paypal', 'visa_debit'].includes(method)) return res.status(400).json({ error: 'Choose PayPal or Visa debit' });
-  if (method === 'paypal') {
-    const email = String(b.paypal_email || '').trim().slice(0, 120);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid PayPal email' });
-    db.prepare(`INSERT INTO payout_methods (user_id, method, paypal_email, card_last4, card_name, updated_at)
-      VALUES (?,?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET method=excluded.method, paypal_email=excluded.paypal_email, card_last4=NULL, card_name=NULL, updated_at=datetime('now')`)
-      .run(req.user.id, method, email, null, null);
-  } else {
-    const name = String(b.card_name || '').trim().slice(0, 60);
-    const digits = String(b.card_last4 || '').replace(/\D/g, '');
-    if (digits.length > 4) return res.status(400).json({ error: 'For safety, enter ONLY the last 4 digits — never the full card number' });
-    if (digits.length !== 4) return res.status(400).json({ error: 'Enter the last 4 digits of the card' });
-    if (!name) return res.status(400).json({ error: 'Enter the name on the card' });
-    db.prepare(`INSERT INTO payout_methods (user_id, method, paypal_email, card_last4, card_name, updated_at)
-      VALUES (?,?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET method=excluded.method, paypal_email=NULL, card_last4=excluded.card_last4, card_name=excluded.card_name, updated_at=datetime('now')`)
-      .run(req.user.id, method, null, digits, name);
-  }
-  const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id);
-  res.json({ ok: true, payoutMethod: pm });
+  res.status(410).json({ error: 'Withdrawals live on Lumibank' });
 });
 
 app.delete('/api/wallet/payout-method', authRequired, (req, res) => {
-  db.prepare('DELETE FROM payout_methods WHERE user_id = ?').run(req.user.id);
-  res.json({ ok: true });
+  res.status(410).json({ error: 'Withdrawals live on Lumibank' });
 });
 
 app.post('/api/wallet/payout', authRequired, (req, res) => {
-  const canEarn = req.user.verified && ['business', 'creator'].includes(req.user.account_type);
-  if (!canEarn) return res.status(403).json({ error: 'Earnings require an Approved Business/Creator account' });
-  ensureWallet(req.user.id);
-  const w = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
-  if (w.earnings_cents < 1000) return res.status(400).json({ error: 'Minimum payout is $10.00' });
-  const pm = db.prepare('SELECT * FROM payout_methods WHERE user_id = ?').get(req.user.id);
-  if (!pm) return res.status(400).json({ error: 'Add a cashout method first (PayPal or Visa debit) — you can save one in your Wallet anytime' });
-  const amount = Math.floor(w.earnings_cents);
-  const destination = pm.method === 'paypal' ? pm.paypal_email : ('Visa debit •••• ' + pm.card_last4);
-  db.prepare('UPDATE wallets SET earnings_cents = earnings_cents - ? WHERE user_id = ?').run(amount, req.user.id);
-  const r = db.prepare('INSERT INTO payouts (user_id, amount_cents, status, method, destination) VALUES (?,?,?,?,?)')
-    .run(req.user.id, amount, 'pending', pm.method, destination);
-  res.json({ ok: true, id: r.lastInsertRowid, amount_cents: amount, method: pm.method, destination });
+  res.status(410).json({ error: 'Withdrawals live on Lumibank' });
 });
 
 // ---------- admin (developer only) ----------
