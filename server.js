@@ -31,7 +31,7 @@ const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 // ---------- helpers ----------
-const AI_CONFIGURED = () => !!process.env.OPENAI_API_KEY;
+const AI_CONFIGURED = () => !!process.env.LUMIAI_API_KEY;
 
 // ---------- AI call path (shared by mentors + companions) ----------
 // Speed rules: only the last AI_CONTEXT_LIMIT stored messages are SENT per
@@ -48,13 +48,13 @@ function isOverloadError(e) {
 }
 
 async function callAIOnce(system, messages, { maxTokens, contextLimit, stream, onToken }) {
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const model = process.env.LUMIAI_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+  const base = (process.env.LUMIAI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${process.env.LUMIAI_API_KEY}`,
     },
     body: JSON.stringify({
       model,
