@@ -19,14 +19,18 @@ services:
         sync: false # set in the Render dashboard — free cloud DB for permanent accounts
       - key: TURSO_AUTH_TOKEN
         sync: false # set in the Render dashboard
-      - key: OPENAI_API_KEY
-        sync: false # set in the Render dashboard — AI mentors/companions need this
-      - key: OPENAI_MODEL
-        value: gemini-3.8-flash # Gemini free lane via AI_BASE_URL (switched Oct 30, 2026; gpt-4o-mini here silently reverted the dashboard setting on blueprint sync)
-      - key: AI_BASE_URL
-        sync: false # optional: point at another OpenAI-compatible endpoint (e.g. Gemini free tier)
+      - key: LUMIAI_API_KEY
+        sync: false # set in the Render dashboard — the LumiAi lane key (free, from the lane console)
+      - key: LUMIAI_MODEL
+        value: meta-llama/llama-3.3-70b-instruct:free # LumiAi lane default model (declared here so blueprint sync keeps it)
+      - key: LUMIAI_BASE_URL
+        value: https://openrouter.ai/api/v1 # the LumiAi lane address
       - key: ADSTERRA_KEY
         sync: false # optional: Adsterra banner unit key — turns on paid network ads in the feed
+      - key: LUMICOIN_CORE_URL
+        sync: false # optional: LumiCoin Core ledger URL — turns on unified LUMI balances for Lumiail-linked users (set together with LUMICOIN_PRODUCT_KEY)
+      - key: LUMICOIN_PRODUCT_KEY
+        sync: false # secret per-product key for LumiCoin Core; never commit the value
       - key: TURN_URL
         sync: false # optional: WebRTC TURN relay (fixes live video on strict networks)
       - key: TURN_USERNAME
