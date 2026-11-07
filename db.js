@@ -329,6 +329,57 @@ CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id);
 CREATE INDEX IF NOT EXISTS idx_smsg_server ON server_messages(server_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_month ON events(month);
 CREATE INDEX IF NOT EXISTS idx_eattempts_event ON event_attempts(event_id, user_id);
+CREATE TABLE IF NOT EXISTS streak_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pair_key TEXT NOT NULL,                        -- 'minId-maxId' of the two users
+  day TEXT NOT NULL,                             -- America/Toronto calendar day 'YYYY-MM-DD'
+  challenge_id TEXT NOT NULL,                    -- challenge id, 'confirm:<challengeId>:<userId>', or 'milestone-<n>'
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_streak_pair ON streak_events(pair_key, day);
+CREATE TABLE IF NOT EXISTS streak_prefs (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pair_key TEXT NOT NULL,
+  emoji TEXT NOT NULL DEFAULT '🔥',
+  PRIMARY KEY (user_id, pair_key)
+);
+CREATE TABLE IF NOT EXISTS post_notify (
+  follower_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  followee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (follower_id, followee_id)
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,   -- recipient
+  actor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- who posted
+  type TEXT NOT NULL DEFAULT 'post',             -- post | lum
+  ref_id INTEGER NOT NULL,                       -- post id or lum id
+  read_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, id);
+CREATE TABLE IF NOT EXISTS live_rank_snapshots (
+  week_key TEXT NOT NULL,                        -- Toronto Monday 'YYYY-MM-DD' of that week
+  board TEXT NOT NULL,                           -- hosts | gifters
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rank INTEGER NOT NULL,
+  total INTEGER NOT NULL,
+  PRIMARY KEY (week_key, board, user_id)
+);
+CREATE TABLE IF NOT EXISTS pets (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  species TEXT NOT NULL,                         -- dog | cat
+  breed TEXT NOT NULL,
+  name TEXT NOT NULL,
+  age_years INTEGER NOT NULL DEFAULT 1,
+  adopted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_food TEXT, last_water TEXT, last_play TEXT,
+  care_streak INTEGER NOT NULL DEFAULT 0,
+  last_care_day TEXT,                            -- America/Toronto 'YYYY-MM-DD'
+  bond_xp INTEGER NOT NULL DEFAULT 0             -- one per care day
+);
 `;
 db.exec(SCHEMA);
 
@@ -351,6 +402,20 @@ const streamCols = db.prepare('PRAGMA table_info(live_streams)').all().map(c => 
 if (streamCols.length && !streamCols.includes('payout_count')) {
   db.exec("ALTER TABLE live_streams ADD COLUMN payout_count INTEGER NOT NULL DEFAULT 0");
 }
+// ---- 2026-11-06 pass: profile fields + presence, Lum scheduling,
+// DM photos, post-notification fan-out flags, Family tier ----
+if (!userCols.includes('height')) db.exec("ALTER TABLE users ADD COLUMN height TEXT");
+if (!userCols.includes('weight')) db.exec("ALTER TABLE users ADD COLUMN weight TEXT");
+if (!userCols.includes('last_seen_at')) db.exec("ALTER TABLE users ADD COLUMN last_seen_at TEXT");
+const lumCols = db.prepare('PRAGMA table_info(lums)').all().map(c => c.name);
+if (lumCols.length && !lumCols.includes('publish_at')) db.exec("ALTER TABLE lums ADD COLUMN publish_at TEXT");
+if (lumCols.length && !lumCols.includes('notified')) db.exec("ALTER TABLE lums ADD COLUMN notified INTEGER NOT NULL DEFAULT 0");
+const postCols = db.prepare('PRAGMA table_info(posts)').all().map(c => c.name);
+if (postCols.length && !postCols.includes('notified')) db.exec("ALTER TABLE posts ADD COLUMN notified INTEGER NOT NULL DEFAULT 0");
+const dmCols = db.prepare('PRAGMA table_info(dm_messages)').all().map(c => c.name);
+if (dmCols.length && !dmCols.includes('image_url')) db.exec("ALTER TABLE dm_messages ADD COLUMN image_url TEXT");
+const friendCols = db.prepare('PRAGMA table_info(friendships)').all().map(c => c.name);
+if (friendCols.length && !friendCols.includes('family')) db.exec("ALTER TABLE friendships ADD COLUMN family INTEGER NOT NULL DEFAULT 0");
 
 // ---- Milestones (11) ----
 const MILESTONES = [
