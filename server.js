@@ -177,6 +177,35 @@ function levelForXp(xp) {
   return lvl;
 }
 
+// Presence: manual status (users.status) + last_seen_at → computed label.
+// offline manual status always wins; a fresh sighting (≤5 min) shows the
+// manual Away/Busy label or "Active now"; ≤24h shows Away; else Offline.
+function presenceFor(u) {
+  if (!u) return { presence: 'offline', presence_label: 'Offline' };
+  const manual = u.status || 'active';
+  if (manual === 'offline') return { presence: 'offline', presence_label: 'Offline' };
+  const seen = u.last_seen_at ? new Date(String(u.last_seen_at).replace(' ', 'T') + 'Z').getTime() : 0;
+  const ageMs = seen ? Date.now() - seen : Infinity;
+  if (ageMs <= 5 * 60 * 1000) {
+    if (manual === 'away') return { presence: 'away', presence_label: 'Away' };
+    if (manual === 'busy') return { presence: 'busy', presence_label: 'Busy' };
+    return { presence: 'active', presence_label: 'Active now' };
+  }
+  if (ageMs <= 24 * 3600 * 1000) return { presence: 'away', presence_label: 'Away' };
+  return { presence: 'offline', presence_label: 'Offline' };
+}
+// Cheap last-seen write: at most once a minute per user, on authed requests.
+function touchLastSeen(user) {
+  if (!user || user.is_ai) return;
+  const seen = user.last_seen_at ? new Date(String(user.last_seen_at).replace(' ', 'T') + 'Z').getTime() : 0;
+  if (!seen || Date.now() - seen > 60 * 1000) {
+    try {
+      db.prepare("UPDATE users SET last_seen_at = datetime('now') WHERE id = ?").run(user.id);
+      user.last_seen_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    } catch (e) { /* presence is best-effort */ }
+  }
+}
+
 function publicUser(u) {
   if (!u) return null;
   return {
@@ -185,6 +214,8 @@ function publicUser(u) {
     role: u.role || 'user',
     is_developer: (u.role === 'developer') || isDeveloperEmail(u.email),
     xp: u.xp, level: u.level, bio: u.bio, public_age: u.public_age,
+    height: u.height || null, weight: u.weight || null,
+    ...presenceFor(u),
     status: u.status, profile_color: u.profile_color, layout: u.layout,
     hobbies: safeJson(u.hobbies, []), avatar_emoji: u.avatar_emoji,
     created_at: u.created_at,
@@ -269,11 +300,16 @@ function trophiesFor(u) {
   return list;
 }
 function profileExtras(u, viewer) {
+  const pet = db.prepare('SELECT species, name FROM pets WHERE user_id = ?').get(u.id);
   return {
     follower_count: followerCount(u.id),
     following_count: followingCount(u.id),
     is_following: !!(viewer && viewer.id !== u.id &&
       db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(viewer.id, u.id)),
+    notify: !!(viewer && viewer.id !== u.id &&
+      db.prepare('SELECT 1 FROM post_notify WHERE follower_id = ? AND followee_id = ? AND enabled = 1').get(viewer.id, u.id)),
+    weekly_champion: weeklyChampionId() === u.id,
+    companion: pet ? { species: pet.species, name: pet.name, emoji: pet.species === 'dog' ? '🐶' : '🐱' } : null,
     trophies: trophiesFor(u),
   };
 }
@@ -362,6 +398,7 @@ function authRequired(req, res, next) {
   const user = getUserById.get(s.user_id);
   if (!user) return res.status(401).json({ error: 'INVALID_TOKEN' });
   req.user = ensureDeveloperRole(user);
+  touchLastSeen(req.user);
   next();
 }
 function optionalAuth(req, res, next) {
@@ -370,6 +407,7 @@ function optionalAuth(req, res, next) {
   if (token) {
     const s = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
     if (s) req.user = getUserById.get(s.user_id) ? ensureDeveloperRole(getUserById.get(s.user_id)) : null;
+    if (req.user) touchLastSeen(req.user);
   }
   next();
 }
@@ -538,13 +576,36 @@ app.get('/api/feed', optionalAuth, (req, res) => {
   res.json({ posts: feed });
 });
 
+// ---------- post notifications ----------
+// Followers who ticked the bell on an author's profile (post_notify) get a
+// notifications row when that author publishes a Post or Lum. Immediate
+// posts notify at creation; scheduled ones notify when they actually
+// publish (promotion for posts, the due sweep below for Lums).
+function notifyFollowers(authorId, type, refId) {
+  try {
+    const rows = db.prepare('SELECT follower_id FROM post_notify WHERE followee_id = ? AND enabled = 1').all(authorId);
+    const ins = db.prepare('INSERT INTO notifications (user_id, actor_id, type, ref_id) VALUES (?,?,?,?)');
+    for (const r of rows) if (r.follower_id !== authorId) ins.run(r.follower_id, authorId, type, refId);
+  } catch (e) { console.error('notifyFollowers', e); }
+}
+function notifyDueLums() {
+  try {
+    const due = db.prepare("SELECT id, user_id FROM lums WHERE publish_at IS NOT NULL AND publish_at <= datetime('now') AND notified = 0").all();
+    for (const l of due) {
+      notifyFollowers(l.user_id, 'lum', l.id);
+      db.prepare('UPDATE lums SET notified = 1 WHERE id = ?').run(l.id);
+    }
+  } catch (e) { console.error('notifyDueLums', e); }
+}
+
 app.post('/api/posts', authRequired, upload.single('image'), (req, res) => {
   const content = (req.body.content || '').slice(0, 2000);
   const type = req.file ? 'photo' : 'text';
   if (!content && !req.file) return res.status(400).json({ error: 'Post needs text or a photo' });
   const image_url = req.file ? '/uploads/' + req.file.filename : null;
-  const r = db.prepare('INSERT INTO posts (user_id, type, content, image_url) VALUES (?,?,?,?)')
+  const r = db.prepare('INSERT INTO posts (user_id, type, content, image_url, notified) VALUES (?,?,?,?,1)')
     .run(req.user.id, type, content, image_url);
+  notifyFollowers(req.user.id, 'post', Number(r.lastInsertRowid));
   addXp(req.user.id, 10);
   unlockMilestone(req.user.id, 'first-post');
   bumpMission(req.user.id, 'post-3');
@@ -558,8 +619,9 @@ function promoteDuePosts() {
   try {
     const due = db.prepare("SELECT * FROM scheduled_posts WHERE publish_at <= datetime('now') ORDER BY publish_at").all();
     for (const s of due) {
-      db.prepare('INSERT INTO posts (user_id, type, content, image_url, created_at) VALUES (?,?,?,?,?)')
+      const pr = db.prepare('INSERT INTO posts (user_id, type, content, image_url, created_at, notified) VALUES (?,?,?,?,?,1)')
         .run(s.user_id, s.image_url ? 'photo' : 'text', s.content, s.image_url, s.publish_at);
+      notifyFollowers(s.user_id, 'post', Number(pr.lastInsertRowid));
       db.prepare('DELETE FROM scheduled_posts WHERE id = ?').run(s.id);
       addXp(s.user_id, 10);
       unlockMilestone(s.user_id, 'first-post');
@@ -568,6 +630,7 @@ function promoteDuePosts() {
     }
     if (due.length) console.log(`🕒 Promoted ${due.length} planned post(s)`);
   } catch (e) { console.error('promoteDuePosts', e); }
+  notifyDueLums();
 }
 setInterval(promoteDuePosts, 20000);
 setTimeout(promoteDuePosts, 5000);
@@ -680,14 +743,23 @@ app.get('/api/lums', optionalAuth, (req, res) => {
     rows = db.prepare(`
       SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role
       FROM lums l JOIN users u ON u.id = l.user_id
-      WHERE LOWER(l.caption) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(u.display_name) LIKE ?
+      WHERE (LOWER(l.caption) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(u.display_name) LIKE ?)
+        AND (l.publish_at IS NULL OR l.publish_at <= datetime('now'))
       ORDER BY l.created_at DESC LIMIT 50`).all(like, like, like);
   } else {
     rows = db.prepare(`
       SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.is_ai, u.role
       FROM lums l JOIN users u ON u.id = l.user_id
+      WHERE (l.publish_at IS NULL OR l.publish_at <= datetime('now'))
       ORDER BY l.created_at DESC LIMIT 50`).all();
   }
+  res.json({ lums: rows });
+});
+
+// The owner's upcoming scheduled Lums (publish_at in the future).
+app.get('/api/lums/scheduled', authRequired, (req, res) => {
+  const rows = db.prepare(`SELECT * FROM lums WHERE user_id = ? AND publish_at IS NOT NULL AND publish_at > datetime('now')
+    ORDER BY publish_at ASC`).all(req.user.id);
   res.json({ lums: rows });
 });
 
@@ -695,12 +767,30 @@ app.post('/api/lums', authRequired, upload.single('video'), (req, res) => {
   const caption = (req.body.caption || '').slice(0, 500);
   const video_url = req.file ? '/uploads/' + req.file.filename : (req.body.video_url || '').slice(0, 500);
   if (!video_url) return res.status(400).json({ error: 'Lum needs a video' });
-  const r = db.prepare('INSERT INTO lums (user_id, video_url, caption) VALUES (?,?,?)')
-    .run(req.user.id, video_url, caption);
+  // Optional scheduling: publish_at in the future stores the Lum hidden
+  // until its time (feed/profile queries filter on publish_at).
+  let publishAt = null;
+  if (req.body.publish_at) {
+    const when = new Date(req.body.publish_at);
+    if (isNaN(when) || when.getTime() < Date.now() + 30000)
+      return res.status(400).json({ error: 'Pick a date and time at least a minute from now' });
+    publishAt = when.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  const r = db.prepare('INSERT INTO lums (user_id, video_url, caption, publish_at, notified) VALUES (?,?,?,?,?)')
+    .run(req.user.id, video_url, caption, publishAt, publishAt ? 0 : 1);
+  if (!publishAt) notifyFollowers(req.user.id, 'lum', Number(r.lastInsertRowid));
   addXp(req.user.id, 10);
   unlockMilestone(req.user.id, 'first-lum');
   bumpMission(req.user.id, 'lum-1');
-  res.json({ ok: true, id: r.lastInsertRowid });
+  res.json({ ok: true, id: r.lastInsertRowid, publish_at: publishAt });
+});
+
+// Cancel one of the owner's not-yet-published scheduled Lums.
+app.post('/api/lums/:id/cancel-schedule', authRequired, (req, res) => {
+  const r = db.prepare("DELETE FROM lums WHERE id = ? AND user_id = ? AND publish_at IS NOT NULL AND publish_at > datetime('now')")
+    .run(parseInt(req.params.id), req.user.id);
+  if (!r.changes) return res.status(404).json({ error: 'Scheduled Lum not found' });
+  res.json({ ok: true });
 });
 
 app.post('/api/lums/:id/view', optionalAuth, (req, res) => {
@@ -890,6 +980,106 @@ app.post('/api/live/start', authRequired, (req, res) => {
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
+// ---------- weekly live rankings ----------
+// Two boards from REAL gift events only: Top Hosts (coins received) and
+// Top Gifters (coins sent). Week = Monday 00:00 → Sunday 23:59
+// America/Toronto. Last week's final table is frozen into
+// live_rank_snapshots lazily (first read after the boundary) and drives
+// the movement arrows + the Weekly Champion crown.
+const _tzFull = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+function torontoOffsetMs(ts) {
+  const parts = {};
+  for (const p of _tzFull.formatToParts(new Date(ts))) parts[p.type] = p.value;
+  const wall = Date.UTC(+parts.year, +parts.month - 1, +parts.day, (+parts.hour) % 24, +parts.minute, +parts.second);
+  return wall - Math.floor(ts / 1000) * 1000;
+}
+function weekInfo(period) {
+  let monday = torontoDay(Date.now());
+  const dow = new Date(monday + 'T12:00:00Z').getUTCDay();
+  monday = dayShift(monday, -((dow + 6) % 7));
+  if (period === 'last') monday = dayShift(monday, -7);
+  const base = Date.parse(monday + 'T00:00:00Z');
+  const startMs = base - torontoOffsetMs(base);
+  return { monday, startMs, endMs: startMs + 7 * 86400000 };
+}
+const sqlTs = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+function weekStandings(board, startMs, endMs) {
+  const range = [sqlTs(startMs), sqlTs(endMs)];
+  if (board === 'gifters') return db.prepare(`SELECT le.user_id AS uid, SUM(le.coins) AS total FROM live_events le
+    WHERE le.kind IN ('gift','free_gift') AND le.coins > 0 AND le.user_id IS NOT NULL AND le.created_at >= ? AND le.created_at < ?
+    GROUP BY le.user_id ORDER BY total DESC, uid ASC`).all(...range);
+  return db.prepare(`SELECT ls.user_id AS uid, SUM(le.coins) AS total FROM live_events le
+    JOIN live_streams ls ON ls.id = le.stream_id
+    WHERE le.kind IN ('gift','free_gift') AND le.coins > 0 AND le.created_at >= ? AND le.created_at < ?
+    GROUP BY ls.user_id ORDER BY total DESC, uid ASC`).all(...range);
+}
+function ensureRankSnapshot(monday, board) {
+  const have = db.prepare('SELECT COUNT(*) c FROM live_rank_snapshots WHERE week_key = ? AND board = ?').get(monday, board).c;
+  if (have) return;
+  const base = Date.parse(monday + 'T00:00:00Z');
+  const startMs = base - torontoOffsetMs(base);
+  const rows = weekStandings(board, startMs, startMs + 7 * 86400000);
+  const ins = db.prepare('INSERT OR IGNORE INTO live_rank_snapshots (week_key, board, user_id, rank, total) VALUES (?,?,?,?,?)');
+  rows.forEach((r, i) => ins.run(monday, board, r.uid, i + 1, r.total));
+}
+function weeklyRankOfHost(uid) {
+  const w = weekInfo('current');
+  const rows = weekStandings('hosts', w.startMs, w.endMs);
+  const i = rows.findIndex(r => r.uid === uid);
+  return i < 0 ? null : i + 1;
+}
+function weeklyChampionId() {
+  const last = weekInfo('last');
+  ensureRankSnapshot(last.monday, 'hosts');
+  const row = db.prepare("SELECT user_id FROM live_rank_snapshots WHERE week_key = ? AND board = 'hosts' AND rank = 1").get(last.monday);
+  return row ? row.user_id : null;
+}
+// One-time room announcement when a gift moves the host into the top 10,
+// or up a rank inside the top 3. Everything else stays quiet.
+function rankClimbCheck(streamRow, beforeRank) {
+  try {
+    const after = weeklyRankOfHost(streamRow.user_id);
+    if (!after) return;
+    const before = beforeRank || 999;
+    if (after <= 10 && (before > 10 || (after < before && after <= 3))) {
+      db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,0,?)')
+        .run(streamRow.id, streamRow.user_id, 'rank', `climbs to #${after} this week!`);
+    }
+  } catch (e) { /* rankings are best-effort */ }
+}
+
+app.get('/api/live/rankings', optionalAuth, (req, res) => {
+  const board = req.query.board === 'gifters' ? 'gifters' : 'hosts';
+  const period = req.query.period === 'last' ? 'last' : 'current';
+  const w = weekInfo(period);
+  // Freeze last week's table the first time anyone looks after a boundary.
+  const lastW = weekInfo('last');
+  ensureRankSnapshot(lastW.monday, 'hosts');
+  ensureRankSnapshot(lastW.monday, 'gifters');
+  let rows;
+  if (period === 'last') {
+    rows = db.prepare('SELECT user_id AS uid, rank, total FROM live_rank_snapshots WHERE week_key = ? AND board = ? ORDER BY rank ASC')
+      .all(w.monday, board);
+  } else {
+    rows = weekStandings(board, w.startMs, w.endMs).map((r, i) => ({ ...r, rank: i + 1 }));
+  }
+  const prevMonday = dayShift(w.monday, -7);
+  ensureRankSnapshot(prevMonday, board);
+  const prev = new Map(db.prepare('SELECT user_id, rank FROM live_rank_snapshots WHERE week_key = ? AND board = ?')
+    .all(prevMonday, board).map(r => [r.user_id, r.rank]));
+  const entries = rows.slice(0, 50).map(r => {
+    const p = prev.get(r.uid);
+    const movement = p === undefined ? 'NEW' : (p - r.rank);
+    return { rank: r.rank, total: r.total, movement, user: publicUser(getUserById.get(r.uid)) };
+  });
+  let me = null;
+  if (req.user) {
+    const mine = rows.find(r => r.uid === req.user.id);
+    if (mine) me = { rank: mine.rank, total: mine.total };
+  }
+  res.json({ board, period, week_key: w.monday, entries, me });
+});
+
 app.get('/api/live/:id', optionalAuth, (req, res) => {
   const s = db.prepare(`SELECT l.*, u.username, u.display_name, u.avatar_emoji, u.role
     FROM live_streams l JOIN users u ON u.id = l.user_id WHERE l.id = ?`).get(req.params.id);
@@ -902,7 +1092,14 @@ app.get('/api/live/:id', optionalAuth, (req, res) => {
     db.prepare('UPDATE live_streams SET viewers = ? WHERE id = ?').run(counts.viewers, s.id);
   const participants = liveParticipants(s.id);
   const me = req.user ? participants.find(p => p.user_id === req.user.id) || null : null;
-  res.json({ stream: { ...s, viewers_now: counts.viewers, on_stage: counts.stage }, events: events.reverse(), participants, me });
+  res.json({
+    stream: {
+      ...s, viewers_now: counts.viewers, on_stage: counts.stage,
+      weekly_rank: weeklyRankOfHost(s.user_id),
+      weekly_champion: weeklyChampionId() === s.user_id,
+    },
+    events: events.reverse(), participants, me,
+  });
 });
 
 function liveActive(id) {
@@ -991,6 +1188,7 @@ app.post('/api/live/:id/watch', authRequired, (req, res) => {
 app.post('/api/live/:id/gift', authRequired, async (req, res) => {
   const s = liveActive(req.params.id);
   if (!s) return res.status(404).json({ error: 'Stream not live' });
+  const rankBefore = weeklyRankOfHost(s.user_id);
   const coins = Math.max(1, Math.min(10000, parseInt(req.body.coins) || 0));
   ensureWallet(req.user.id);
   const note = (req.body.note || '').slice(0, 60);
@@ -1013,7 +1211,7 @@ app.post('/api/live/:id/gift', authRequired, async (req, res) => {
         note: note || 'Luminous live gift',
         idempotency_key: `gift-${ev.lastInsertRowid}`,
       });
-      if (purchase) { bumpMission(req.user.id, 'gift-1'); return res.json({ ok: true, coins }); }
+      if (purchase) { bumpMission(req.user.id, 'gift-1'); rankClimbCheck(s, rankBefore); return res.json({ ok: true, coins }); }
       // Core transfer failed after the event was recorded: fall back to the
       // local debit if it can cover the gift; otherwise roll the event and
       // the stream accounting back so nothing is recorded as unpaid.
@@ -1021,6 +1219,7 @@ app.post('/api/live/:id/gift', authRequired, async (req, res) => {
       if (w.coins >= coins) {
         db.prepare('UPDATE wallets SET coins = coins - ? WHERE user_id = ?').run(coins, req.user.id);
         bumpMission(req.user.id, 'gift-1');
+        rankClimbCheck(s, rankBefore);
         return res.json({ ok: true, coins });
       }
       db.prepare('DELETE FROM live_events WHERE id = ?').run(ev.lastInsertRowid);
@@ -1035,6 +1234,7 @@ app.post('/api/live/:id/gift', authRequired, async (req, res) => {
   db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins, note) VALUES (?,?,?,?,?)')
     .run(s.id, req.user.id, 'gift', coins, note);
   bumpMission(req.user.id, 'gift-1');
+  rankClimbCheck(s, rankBefore);
   res.json({ ok: true, coins });
 });
 
@@ -1047,9 +1247,11 @@ app.post('/api/live/:id/free-gift', authRequired, (req, res) => {
     .get(s.id, req.user.id);
   if (last && (Date.now() - new Date(last.created_at + 'Z').getTime()) < 20000)
     return res.json({ ok: true, coins: 0, cooldown: true });
+  const rankBefore = weeklyRankOfHost(s.user_id);
   addStreamCoins(s.id, 1);
   db.prepare('INSERT INTO live_events (stream_id, user_id, kind, coins) VALUES (?,?,?,?)')
     .run(s.id, req.user.id, 'free_gift', 1);
+  rankClimbCheck(s, rankBefore);
   res.json({ ok: true, coins: 1 });
 });
 
@@ -1382,10 +1584,15 @@ app.get('/api/users/:username', optionalAuth, (req, res) => {
   const u = db.prepare('SELECT * FROM users WHERE username = ?').get(req.params.username);
   if (!u) return res.status(404).json({ error: 'User not found' });
   const posts = db.prepare('SELECT * FROM posts WHERE user_id = ? AND is_ad = 0 ORDER BY created_at DESC LIMIT 30').all(u.id);
-  const lums = db.prepare('SELECT * FROM lums WHERE user_id = ? ORDER BY created_at DESC LIMIT 12').all(u.id);
+  const lums = db.prepare("SELECT * FROM lums WHERE user_id = ? AND (publish_at IS NULL OR publish_at <= datetime('now')) ORDER BY created_at DESC LIMIT 12").all(u.id);
   const milestones = db.prepare(`SELECT m.key, m.name FROM milestones m
     JOIN user_milestones um ON um.milestone_id = m.id WHERE um.user_id = ?`).all(u.id);
-  res.json({ user: enrichUser(u, req.user), posts, lums, milestones, isOwn: !!req.user && req.user.id === u.id });
+  let relationship = null;
+  if (req.user && req.user.id !== u.id) {
+    const f = friendshipBetween(req.user.id, u.id);
+    if (f && f.status === 'accepted') relationship = f.family ? 'family' : friendTier(f.accepted_at).key;
+  }
+  res.json({ user: enrichUser(u, req.user), posts, lums, milestones, isOwn: !!req.user && req.user.id === u.id, relationship });
 });
 
 app.patch('/api/profile', authRequired, (req, res) => {
@@ -1396,7 +1603,9 @@ app.patch('/api/profile', authRequired, (req, res) => {
     display_name: v => String(v).slice(0, 60),
     bio: v => String(v).slice(0, 500),
     public_age: v => (v === null || v === '' ? null : Math.max(13, Math.min(120, parseInt(v) || 0)) || null),
-    status: v => ['active', 'offline', 'away'].includes(v) ? v : 'active',
+    height: v => (v === null || v === '' ? null : String(v).slice(0, 12)),
+    weight: v => (v === null || v === '' ? null : String(v).slice(0, 12)),
+    status: v => ['active', 'offline', 'away', 'busy'].includes(v) ? v : 'active',
     profile_color: v => String(v).slice(0, 16),
     layout: v => ['grid', 'list'].includes(v) ? v : 'grid',
     hobbies: v => JSON.stringify((Array.isArray(v) ? v : []).slice(0, 12).map(String)),
@@ -1443,6 +1652,151 @@ function friendshipBetween(a, b) {
   return db.prepare(`SELECT * FROM friendships
     WHERE (requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)`).get(a, b, b, a);
 }
+// ---------- DM streaks ----------
+// A streak day counts when BOTH friends send at least one DM that calendar
+// day (America/Toronto) — or when the pair completes that day's streak
+// challenge (a streak_events completion row secures the day). Counts derive
+// only from real messages + recorded challenge events; nothing is seeded.
+const STREAK_MILESTONES = { 7: 25, 30: 100, 100: 500 };
+const STREAK_CHALLENGES = [
+  { id: 'gift-live', title: 'Trade a gift in a live room', measurable: 'gift' },
+  { id: 'both-post', title: 'Both post today', measurable: 'posts' },
+  { id: 'messages-10', title: 'Send 10 messages between you', measurable: 'messages' },
+  { id: 'server-visit', title: 'Visit a LumiServer together', measurable: null },
+];
+const STREAK_EMOJIS = ['🔥', '⚡', '❤️', '💎', '⭐', '🌙', '🎮', '✝️', '💜', '✨'];
+function pairKey(a, b) { return a < b ? `${a}-${b}` : `${b}-${a}`; }
+const _tzFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' });
+function torontoParts(ts) {
+  const parts = {};
+  for (const p of _tzFmt.formatToParts(new Date(ts))) parts[p.type] = p.value;
+  return parts;
+}
+function torontoDay(ts) { const p = torontoParts(ts); return `${p.year}-${p.month}-${p.day}`; }
+function torontoHour(ts) { return parseInt(torontoParts(ts).hour, 10) || 0; }
+function utcTs(sqlTs) { return new Date(String(sqlTs).replace(' ', 'T') + 'Z').getTime(); }
+function dayShift(dayStr, n) {
+  const d = new Date(dayStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function challengeForDay(pair, dayStr) {
+  const seed = pair.split('-').reduce((s, x) => s + parseInt(x, 10), 0);
+  const doy = Math.floor((new Date(dayStr + 'T12:00:00Z') - new Date(dayStr.slice(0, 4) + '-01-01T12:00:00Z')) / 86400000);
+  return STREAK_CHALLENGES[Math.abs(seed + doy) % STREAK_CHALLENGES.length];
+}
+async function creditStreakReward(user, amount, pk, milestone) {
+  // Same unified-ledger-first pattern as creditMissionReward.
+  if (amount > 0 && lumicoin.enabled() && user.lumiail_address) {
+    const r = await lumicoin.postTransaction({
+      lumiail_address: user.lumiail_address, kind: 'earn', amount,
+      note: `Streak milestone: ${milestone} days`,
+      idempotency_key: `streak-${pk}-${milestone}`,
+    });
+    if (r) return r.wallet ? r.wallet.balance : null;
+  }
+  ensureWallet(user.id);
+  db.prepare('UPDATE wallets SET coins = coins + ? WHERE user_id = ?').run(amount, user.id);
+  const w = db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(user.id);
+  return w ? w.coins : null;
+}
+function streakEmoji(meId, pk) {
+  const p = db.prepare('SELECT emoji FROM streak_prefs WHERE user_id = ? AND pair_key = ?').get(meId, pk);
+  return p ? p.emoji : '🔥';
+}
+function streakData(meId, otherId) {
+  const pk = pairKey(meId, otherId);
+  const msgs = db.prepare(`SELECT sender_id, created_at FROM dm_messages
+    WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))
+      AND created_at >= datetime('now','-400 days')`).all(meId, otherId, otherId, meId);
+  const daysMe = new Set(), daysOther = new Set();
+  for (const m of msgs) (m.sender_id === meId ? daysMe : daysOther).add(torontoDay(utcTs(m.created_at)));
+  const events = db.prepare('SELECT * FROM streak_events WHERE pair_key = ? ORDER BY id ASC').all(pk);
+  const challengeDays = new Set();
+  for (const e of events) if (!e.challenge_id.startsWith('confirm:') && !e.challenge_id.startsWith('milestone-')) challengeDays.add(e.day);
+  const counted = d => (daysMe.has(d) && daysOther.has(d)) || challengeDays.has(d);
+  const today = torontoDay(Date.now());
+  const yesterday = dayShift(today, -1);
+  let current = 0;
+  let cursor = counted(today) ? today : (counted(yesterday) ? yesterday : null);
+  while (cursor && counted(cursor)) { current++; cursor = dayShift(cursor, -1); }
+  const allCounted = new Set([...daysMe, ...daysOther, ...challengeDays].filter(d => counted(d)));
+  let longest = 0, run = 0; let prev = null;
+  for (const d of [...allCounted].sort()) { run = (prev && dayShift(prev, 1) === d) ? run + 1 : 1; longest = Math.max(longest, run); prev = d; }
+  const todaySecured = counted(today);
+  return {
+    pair_key: pk, current, longest, today_secured: todaySecured,
+    at_risk: !todaySecured && current > 0 && torontoHour(Date.now()) >= 18,
+    events,
+  };
+}
+function streakChallengeState(meId, otherId, data) {
+  const today = torontoDay(Date.now());
+  const ch = challengeForDay(data.pair_key, today);
+  const confirms = data.events.filter(e => e.day === today && e.challenge_id === `confirm:${ch.id}:${meId}` || e.day === today && e.challenge_id === `confirm:${ch.id}:${otherId}`);
+  const confirmedBy = [...new Set(confirms.map(e => e.user_id))];
+  const completed = data.events.some(e => e.day === today && e.challenge_id === ch.id);
+  let progress = null, met = false;
+  if (ch.measurable === 'messages') {
+    const rows = db.prepare(`SELECT created_at FROM dm_messages WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))`).all(meId, otherId, otherId, meId);
+    const n = rows.filter(r => torontoDay(utcTs(r.created_at)) === today).length;
+    progress = { n, target: 10, label: `${n}/10 messages today` };
+    met = n >= 10;
+  } else if (ch.measurable === 'posts') {
+    const posted = uid => db.prepare('SELECT created_at FROM posts WHERE user_id = ? AND is_ad = 0 ORDER BY id DESC LIMIT 20').all(uid)
+      .some(r => torontoDay(utcTs(r.created_at)) === today);
+    const a = posted(meId), b = posted(otherId);
+    progress = { n: (a ? 1 : 0) + (b ? 1 : 0), target: 2, label: `${a ? 'You posted ✓' : 'You: not yet'} · ${b ? 'They posted ✓' : 'Friend: not yet'}` };
+    met = a && b;
+  } else if (ch.measurable === 'gift') {
+    const rows = db.prepare(`SELECT user_id, created_at FROM live_events WHERE kind IN ('gift','free_gift') AND user_id IN (?,?) ORDER BY id DESC LIMIT 50`).all(meId, otherId);
+    const n = rows.filter(r => torontoDay(utcTs(r.created_at)) === today).length;
+    progress = { n, target: 1, label: n ? 'A gift was traded today ✓' : 'No live gift yet today' };
+    met = n >= 1;
+  }
+  return { id: ch.id, title: ch.title, measurable: ch.measurable, progress, met, confirmed_by: confirmedBy, completed: completed || met };
+}
+// Settle side effects for a pair: auto-complete a met challenge, then pay
+// any newly reached milestone bonuses (idempotent via milestone events).
+async function settleStreak(meId, otherId) {
+  const data = streakData(meId, otherId);
+  const today = torontoDay(Date.now());
+  const state = streakChallengeState(meId, otherId, data);
+  if (state.met && !state.completed) {
+    db.prepare('INSERT INTO streak_events (pair_key, day, challenge_id, user_id) VALUES (?,?,?,NULL)')
+      .run(data.pair_key, today, state.id);
+  }
+  const fresh = streakData(meId, otherId);
+  const rewards = [];
+  for (const [mStr, coins] of Object.entries(STREAK_MILESTONES)) {
+    const m = parseInt(mStr, 10);
+    if (fresh.current >= m && !fresh.events.some(e => e.challenge_id === `milestone-${m}`)) {
+      const me = getUserById.get(meId), other = getUserById.get(otherId);
+      if (me) await creditStreakReward(me, coins, data.pair_key, m);
+      if (other) await creditStreakReward(other, coins, data.pair_key, m);
+      db.prepare('INSERT INTO streak_events (pair_key, day, challenge_id, user_id) VALUES (?,?,?,NULL)')
+        .run(data.pair_key, today, `milestone-${m}`);
+      rewards.push({ milestone: m, coins });
+    }
+  }
+  const finalData = streakData(meId, otherId);
+  return { data: finalData, challenge: streakChallengeState(meId, otherId, finalData), rewards };
+}
+function streakPayload(meId, otherId, settled) {
+  const { data, challenge, rewards } = settled;
+  const timeline = data.events
+    .filter(e => !e.challenge_id.startsWith('confirm:'))
+    .slice(-30).reverse()
+    .map(e => e.challenge_id.startsWith('milestone-')
+      ? { kind: 'milestone', day: e.day, label: `${streakEmoji(meId, data.pair_key)} ${e.challenge_id.replace('milestone-', '')}-day streak milestone · +${STREAK_MILESTONES[e.challenge_id.replace('milestone-', '')] || 0} coins each` }
+      : { kind: 'challenge', day: e.day, label: `Challenge complete: ${(STREAK_CHALLENGES.find(c => c.id === e.challenge_id) || {}).title || e.challenge_id}` });
+  return {
+    current: data.current, longest: data.longest, at_risk: data.at_risk,
+    today_secured: data.today_secured, emoji: streakEmoji(meId, data.pair_key),
+    challenge, timeline, rewards: rewards || [],
+  };
+}
+
 function friendSummary(f, meId) {
   const otherId = f.requester_id === meId ? f.addressee_id : f.requester_id;
   const other = getUserById.get(otherId);
@@ -1451,11 +1805,20 @@ function friendSummary(f, meId) {
     ORDER BY id DESC LIMIT 1`).get(meId, otherId, otherId, meId);
   const unread = db.prepare(`SELECT COUNT(*) c FROM dm_messages
     WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL`).get(otherId, meId).c;
+  let tier = f.status === 'accepted' ? friendTier(f.accepted_at) : null;
+  const family = !!(f.family && f.status === 'accepted');
+  if (family && tier) tier = { ...tier, key: 'family', label: 'Family', emoji: '👨‍👩‍👧' };
+  let streak = null;
+  if (f.status === 'accepted' && other) {
+    const sd = streakData(meId, otherId);
+    streak = { current: sd.current, at_risk: sd.at_risk, today_secured: sd.today_secured, emoji: streakEmoji(meId, sd.pair_key) };
+  }
   return {
     friendship_id: f.id, status: f.status, accepted_at: f.accepted_at, created_at: f.created_at,
-    i_requested: f.requester_id === meId,
+    i_requested: f.requester_id === meId, family,
     user: publicUser(other),
-    tier: f.status === 'accepted' ? friendTier(f.accepted_at) : null,
+    tier,
+    streak,
     last_message: last ? { content: last.content, created_at: last.created_at, from_me: last.sender_id === meId } : null,
     unread,
   };
@@ -1471,7 +1834,7 @@ app.get('/api/friends', authRequired, (req, res) => {
     else if (f.addressee_id === req.user.id) incoming.push(s);
     else outgoing.push(s);
   }
-  const rank = { best: 0, close: 1, friend: 2, acquaintance: 3 };
+  const rank = { family: -1, best: 0, close: 1, friend: 2, acquaintance: 3 };
   friends.sort((a, b) => (rank[a.tier.key] - rank[b.tier.key]) || ((b.last_message?.created_at || '') < (a.last_message?.created_at || '') ? -1 : 1));
   res.json({ friends, incoming, outgoing });
 });
@@ -1565,14 +1928,16 @@ app.get('/api/dm/:userId', authRequired, (req, res) => {
   res.json({ friend: publicUser(other), tier: accepted ? friendTier(accepted.accepted_at) : friendTier(new Date().toISOString()), messages });
 });
 
-app.post('/api/dm/:userId', authRequired, (req, res) => {
+app.post('/api/dm/:userId', authRequired, upload.single('image'), (req, res) => {
   const other = getUserById.get(parseInt(req.params.userId));
   if (!other) return res.status(404).json({ error: 'User not found' });
-  // DMs are open: anyone can message anyone — no accepted-friendship requirement
+  // DMs are open: anyone can message anyone — no accepted-friendship requirement.
+  // Text, or a photo (multipart 'image' — the camera sheet's send path).
   const content = String((req.body || {}).content || '').trim().slice(0, 1000);
-  if (!content) return res.status(400).json({ error: 'Message is empty' });
-  const r = db.prepare('INSERT INTO dm_messages (sender_id, recipient_id, content) VALUES (?,?,?)')
-    .run(req.user.id, other.id, content);
+  const image_url = req.file ? '/uploads/' + req.file.filename : null;
+  if (!content && !image_url) return res.status(400).json({ error: 'Message is empty' });
+  const r = db.prepare('INSERT INTO dm_messages (sender_id, recipient_id, content, image_url) VALUES (?,?,?,?)')
+    .run(req.user.id, other.id, content, image_url);
   const msg = db.prepare('SELECT * FROM dm_messages WHERE id = ?').get(r.lastInsertRowid);
   if (other.is_ai) { // demo friends write back so chats never feel one-sided
     const reply = AI_DM_REPLIES[Math.floor(Math.random() * AI_DM_REPLIES.length)];
@@ -1582,6 +1947,183 @@ app.post('/api/dm/:userId', authRequired, (req, res) => {
     }, 2500);
   }
   res.json({ ok: true, message: msg });
+});
+
+// ---------- streak endpoints ----------
+app.get('/api/messages/:userId/streak', authRequired, async (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  const settled = await settleStreak(req.user.id, other.id);
+  res.json(streakPayload(req.user.id, other.id, settled));
+});
+
+app.post('/api/messages/:userId/streak/challenge/confirm', authRequired, async (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  let settled = await settleStreak(req.user.id, other.id);
+  if (!settled.challenge.completed) {
+    const today = torontoDay(Date.now());
+    const cid = `confirm:${settled.challenge.id}:${req.user.id}`;
+    const dupe = db.prepare('SELECT 1 FROM streak_events WHERE pair_key = ? AND day = ? AND challenge_id = ?')
+      .get(settled.data.pair_key, today, cid);
+    if (!dupe) db.prepare('INSERT INTO streak_events (pair_key, day, challenge_id, user_id) VALUES (?,?,?,?)')
+      .run(settled.data.pair_key, today, cid, req.user.id);
+    // Both friends confirmed → the challenge completes and secures the day.
+    const data2 = streakData(req.user.id, other.id);
+    const st2 = streakChallengeState(req.user.id, other.id, data2);
+    if (st2.confirmed_by.length >= 2) {
+      db.prepare('INSERT INTO streak_events (pair_key, day, challenge_id, user_id) VALUES (?,?,?,NULL)')
+        .run(settled.data.pair_key, today, st2.id);
+    }
+    settled = await settleStreak(req.user.id, other.id);
+  }
+  res.json(streakPayload(req.user.id, other.id, settled));
+});
+
+app.post('/api/messages/:userId/streak/emoji', authRequired, (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  const emoji = String((req.body || {}).emoji || '').trim();
+  const graphemes = [...emoji];
+  if (!emoji || emoji.length > 8 || graphemes.length > 2)
+    return res.status(400).json({ error: 'Pick a single emoji' });
+  const pk = pairKey(req.user.id, other.id);
+  db.prepare(`INSERT INTO streak_prefs (user_id, pair_key, emoji) VALUES (?,?,?)
+    ON CONFLICT(user_id, pair_key) DO UPDATE SET emoji = excluded.emoji`).run(req.user.id, pk, emoji);
+  res.json({ ok: true, emoji });
+});
+
+// ---------- Furry companion (virtual pet) ----------
+// Meters decay over real time (~24h full → empty since the last care of
+// that kind) and are computed on read from timestamps — no cron. The pet
+// never dies or leaves; neglect only makes it sad.
+const PET_BREEDS = {
+  dog: ['Labrador', 'Golden Retriever', 'German Shepherd', 'Husky', 'Chihuahua', 'Poodle', 'Bulldog', 'Mixed'],
+  cat: ['Tabby', 'Siamese', 'Maine Coon', 'Persian', 'Bengal', 'British Shorthair', 'Sphynx', 'Mixed'],
+};
+const PET_BOND_TITLES = ['New Friend', 'Getting Comfortable', 'Buddy', 'Good Friend', 'Close Companion', 'Trusted Friend', 'Best Friend', 'Kindred Spirit', 'Family', 'Soulmate'];
+const PET_LINES = {
+  dog: {
+    happy: ['Best day ever — you’re here!', 'Tail wagging at full speed. 🐾', 'I did a happy spin just for you!'],
+    content: ['All is well in my world.', 'I napped, I dreamed of you, I woke up smiling.', 'Ready when you are.'],
+    hungry: ['My bowl is echoing… 🍖', 'I dream of kibble. And bacon. Mostly bacon.'],
+    thirsty: ['My water bowl is dry… 💧', 'So… thirsty… dramatically thirsty.'],
+    lonely: ['I waited by the door for you. ❤️', 'The house is quiet without your pets and play.'],
+  },
+  cat: {
+    happy: ['Purring at maximum volume.', 'I have decided you may adore me now. 🐾', 'A slow blink, just for you.'],
+    content: ['The sunbeam and I are in a committed relationship.', 'I knocked nothing over today. You’re welcome.', 'All is calm in my kingdom.'],
+    hungry: ['The bowl. It is empty. This is a crisis. 🍖', 'I have never been fed. Ever. (Feed me.)'],
+    thirsty: ['My water is gone and so is my patience. 💧', 'A cat requires hydration. Promptly.'],
+    lonely: ['I sat on your chair to keep it warm. ❤️', 'Attention. That is all. That is the message.'],
+  },
+};
+function petStage(species, ageYears) {
+  if (ageYears < 1) return species === 'dog' ? 'Puppy' : 'Kitten';
+  if (ageYears <= 7) return 'Adult';
+  return 'Senior';
+}
+function petView(p) {
+  const meter = last => {
+    const t = last ? utcTs(last) : utcTs(p.adopted_at);
+    return Math.max(0, Math.min(100, Math.round(100 - (Date.now() - t) / (24 * 3600 * 1000) * 100)));
+  };
+  const meters = { food: meter(p.last_food), water: meter(p.last_water), love: meter(p.last_play) };
+  let mood = 'content', moodLabel = 'Content';
+  const low = [['food', 'hungry', 'Hungry'], ['water', 'thirsty', 'Thirsty'], ['love', 'lonely', 'Lonely']]
+    .sort((a, b) => meters[a[0]] - meters[b[0]])[0];
+  if (meters[low[0]] < 25) { mood = low[1]; moodLabel = low[2]; }
+  else if (meters.food >= 60 && meters.water >= 60 && meters.love >= 60) { mood = 'happy'; moodLabel = 'Happy'; }
+  const lines = PET_LINES[p.species][mood];
+  const line = lines[Math.floor(Date.now() / 3600000) % lines.length];
+  const bondLevel = Math.max(1, Math.min(10, 1 + Math.floor(p.bond_xp / 3)));
+  const careReadyIn = kind => {
+    const last = p['last_' + kind];
+    if (!last) return 0;
+    return Math.max(0, 6 * 3600 * 1000 - (Date.now() - utcTs(last)));
+  };
+  return {
+    species: p.species, breed: p.breed, name: p.name, age_years: p.age_years,
+    stage: petStage(p.species, p.age_years), emoji: p.species === 'dog' ? '🐕' : '🐈',
+    face: p.species === 'dog' ? '🐶' : '🐱',
+    meters, mood, mood_label: moodLabel, line,
+    care_streak: p.care_streak, bond_xp: p.bond_xp,
+    bond_level: bondLevel, bond_title: PET_BOND_TITLES[bondLevel - 1],
+    care_ready_in: { food: careReadyIn('food'), water: careReadyIn('water'), play: careReadyIn('play') },
+    adopted_at: p.adopted_at,
+  };
+}
+const getPet = db.prepare('SELECT * FROM pets WHERE user_id = ?');
+
+app.get('/api/companion', authRequired, (req, res) => {
+  const p = getPet.get(req.user.id);
+  res.json({ pet: p ? petView(p) : null, breeds: PET_BREEDS });
+});
+
+app.post('/api/companion/adopt', authRequired, (req, res) => {
+  if (getPet.get(req.user.id)) return res.status(400).json({ error: 'You already have a companion — they’re waiting for you in My Companion.' });
+  const b = req.body || {};
+  const species = b.species === 'cat' ? 'cat' : (b.species === 'dog' ? 'dog' : null);
+  if (!species) return res.status(400).json({ error: 'Pick a dog or a cat' });
+  const breed = String(b.breed || '');
+  if (!PET_BREEDS[species].includes(breed)) return res.status(400).json({ error: 'Pick a breed from the list' });
+  const name = String(b.name || '').trim().slice(0, 20);
+  if (!name) return res.status(400).json({ error: 'Give your companion a name' });
+  const age = Math.max(0, Math.min(20, parseInt(b.age_years) || 0));
+  db.prepare('INSERT INTO pets (user_id, species, breed, name, age_years) VALUES (?,?,?,?,?)')
+    .run(req.user.id, species, breed, name, age);
+  res.json({ ok: true, pet: petView(getPet.get(req.user.id)) });
+});
+
+app.post('/api/companion/care', authRequired, (req, res) => {
+  const p = getPet.get(req.user.id);
+  if (!p) return res.status(404).json({ error: 'No companion yet — adopt one first' });
+  const kind = String((req.body || {}).kind || '');
+  if (!['food', 'water', 'play'].includes(kind)) return res.status(400).json({ error: 'Unknown care kind' });
+  const last = p['last_' + kind];
+  // Each kind counts once per ~6h — spam-clicking doesn't farm the meters.
+  if (last && Date.now() - utcTs(last) < 6 * 3600 * 1000)
+    return res.json({ ok: true, counted: false, pet: petView(p) });
+  db.prepare(`UPDATE pets SET last_${kind} = datetime('now') WHERE user_id = ?`).run(req.user.id);
+  const p2 = getPet.get(req.user.id);
+  // A care day = all three kinds cared for on the same Toronto calendar day.
+  const today = torontoDay(Date.now());
+  const caredToday = k => p2['last_' + k] && torontoDay(utcTs(p2['last_' + k])) === today;
+  let careDay = false;
+  if (caredToday('food') && caredToday('water') && caredToday('play') && p2.last_care_day !== today) {
+    const streak = p2.last_care_day === dayShift(today, -1) ? p2.care_streak + 1 : 1;
+    db.prepare('UPDATE pets SET care_streak = ?, last_care_day = ?, bond_xp = bond_xp + 1 WHERE user_id = ?')
+      .run(streak, today, req.user.id);
+    careDay = true;
+  }
+  res.json({ ok: true, counted: true, care_day: careDay, pet: petView(getPet.get(req.user.id)) });
+});
+
+app.post('/api/companion/rename', authRequired, (req, res) => {
+  const p = getPet.get(req.user.id);
+  if (!p) return res.status(404).json({ error: 'No companion yet — adopt one first' });
+  const name = String((req.body || {}).name || '').trim().slice(0, 20);
+  if (!name) return res.status(400).json({ error: 'Name cannot be empty' });
+  db.prepare('UPDATE pets SET name = ? WHERE user_id = ?').run(name, req.user.id);
+  res.json({ ok: true, pet: petView(getPet.get(req.user.id)) });
+});
+
+// ---------- Family tier (above Best Friends, by choice only) ----------
+app.post('/api/friends/:userId/family', authRequired, (req, res) => {
+  const other = getUserById.get(parseInt(req.params.userId));
+  if (!other) return res.status(404).json({ error: 'User not found' });
+  const f = friendshipBetween(req.user.id, other.id);
+  if (!f || f.status !== 'accepted') return res.status(400).json({ error: 'You are not friends yet' });
+  const want = !!((req.body || {}).family);
+  if (want) {
+    // The gate is the real tier: Best Friends takes 90+ real days.
+    if (friendTier(f.accepted_at).key !== 'best')
+      return res.status(400).json({ error: 'FAMILY_LOCKED', message: 'Family unlocks at Best Friends — 90 days of friendship.' });
+    db.prepare('UPDATE friendships SET family = 1 WHERE id = ?').run(f.id);
+  } else {
+    db.prepare('UPDATE friendships SET family = 0 WHERE id = ?').run(f.id);
+  }
+  res.json({ ok: true, family: want });
 });
 
 // ---------- calls (WebRTC signaling over REST polling) ----------
@@ -1679,7 +2221,35 @@ app.post('/api/users/:id/unfollow', authRequired, (req, res) => {
   const target = getUserById.get(parseInt(req.params.id));
   if (!target) return res.status(404).json({ error: 'User not found' });
   db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(req.user.id, target.id);
+  db.prepare('DELETE FROM post_notify WHERE follower_id = ? AND followee_id = ?').run(req.user.id, target.id);
   res.json({ ok: true, following: false, follower_count: followerCount(target.id) });
+});
+
+// Bell toggle: "notify me when they post" (only on accounts you follow).
+app.post('/api/users/:id/notify', authRequired, (req, res) => {
+  const target = getUserById.get(parseInt(req.params.id));
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const following = db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(req.user.id, target.id);
+  if (!following) return res.status(400).json({ error: 'Follow them first to get post notifications' });
+  const enabled = !!((req.body || {}).enabled);
+  db.prepare(`INSERT INTO post_notify (follower_id, followee_id, enabled) VALUES (?,?,?)
+    ON CONFLICT(follower_id, followee_id) DO UPDATE SET enabled = excluded.enabled`)
+    .run(req.user.id, target.id, enabled ? 1 : 0);
+  res.json({ ok: true, notify: enabled });
+});
+
+app.get('/api/notifications', authRequired, (req, res) => {
+  const rows = db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(req.user.id);
+  const unread = db.prepare('SELECT COUNT(*) c FROM notifications WHERE user_id = ? AND read_at IS NULL').get(req.user.id).c;
+  res.json({
+    notifications: rows.map(n => ({ ...n, read: !!n.read_at, actor: publicUser(getUserById.get(n.actor_id)) })),
+    unread,
+  });
+});
+
+app.post('/api/notifications/read', authRequired, (req, res) => {
+  db.prepare("UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL").run(req.user.id);
+  res.json({ ok: true, unread: 0 });
 });
 
 // ---------- Mystery pack: hidden LumiServers ----------
