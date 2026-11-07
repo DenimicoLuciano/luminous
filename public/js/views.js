@@ -1364,21 +1364,15 @@ const Views = {
       const text = inp.value.trim(); if (!text) return;
       inp.value = '';
       box.innerHTML += `<div class="msg user">${esc(text)}</div>`;
-      box.innerHTML += `<div class="msg assistant" id="typing"><i>typing…</i></div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        let firstToken = true;
-        const r = await API.streamPost(`/mentors/${key}/chat`, { message: text }, (tok) => {
-          const t = document.getElementById('typing');
-          if (!t) return;
-          if (firstToken) { t.textContent = ''; firstToken = false; }
-          t.textContent += tok;
-          box.scrollTop = box.scrollHeight;
-        });
-        document.getElementById('typing')?.remove();
+        // Instant-response presentation: no typing indicator, no
+        // word-by-word reveal. Streamed chunks are buffered invisibly
+        // (no onToken callback) and the reply renders once, complete.
+        const r = await API.streamPost(`/mentors/${key}/chat`, { message: text }, null);
         if (r.aiConfigured) box.innerHTML += `<div class="msg assistant">${esc(r.reply)}</div>`;
         else box.innerHTML += `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
-      } catch (e) { document.getElementById('typing')?.remove(); box.innerHTML += e && e.name === 'AbortError' ? `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>` : `<div class="msg assistant"><i>Something went wrong.</i></div>`; }
+      } catch (e) { box.innerHTML += e && e.name === 'AbortError' ? `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>` : `<div class="msg assistant"><i>Something went wrong.</i></div>`; }
       box.scrollTop = box.scrollHeight;
     };
     document.getElementById('chatSend').onclick = send;
@@ -1475,20 +1469,15 @@ const Views = {
       const inp = document.getElementById('chatIn');
       const text = inp.value.trim(); if (!text) return;
       inp.value = '';
-      box.innerHTML += `<div class="msg user">${esc(text)}</div><div class="msg assistant" id="typing"><i>typing…</i></div>`;
+      box.innerHTML += `<div class="msg user">${esc(text)}</div>`;
       box.scrollTop = box.scrollHeight;
       try {
-        let firstToken = true;
-        const r = await API.streamPost(`/companions/${id}/chat`, { message: text }, (tok) => {
-          const t = document.getElementById('typing');
-          if (!t) return;
-          if (firstToken) { t.textContent = ''; firstToken = false; }
-          t.textContent += tok;
-          box.scrollTop = box.scrollHeight;
-        });
-        document.getElementById('typing')?.remove();
+        // Instant-response presentation: no typing indicator, no
+        // word-by-word reveal. Streamed chunks are buffered invisibly
+        // (no onToken callback) and the reply renders once, complete.
+        const r = await API.streamPost(`/companions/${id}/chat`, { message: text }, null);
         box.innerHTML += r.aiConfigured ? `<div class="msg assistant">${esc(r.reply)}</div>` : `<div class="msg assistant"><i>⚠️ AI is not configured on this server yet.</i></div>`;
-      } catch (e) { document.getElementById('typing')?.remove(); if (e && e.name === 'AbortError') box.innerHTML += `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>`; }
+      } catch (e) { if (e && e.name === 'AbortError') box.innerHTML += `<div class="msg assistant"><i>⏳ The AI lane is very slow right now — if a reply arrives late it will show when you reopen this chat.</i></div>`; }
       box.scrollTop = box.scrollHeight;
     };
     document.getElementById('chatSend').onclick = send;
