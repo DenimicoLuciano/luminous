@@ -88,12 +88,13 @@ const App = {
     const el = document.getElementById('app');
     const hash = location.hash || '#/';
     if (window._chatTimer && !hash.startsWith('#/chat/')) { clearInterval(window._chatTimer); window._chatTimer = null; }
+    if (window._serverTimer && !hash.startsWith('#/servers/')) { clearInterval(window._serverTimer); window._serverTimer = null; }
     if (window._liveCleanup && !hash.startsWith('#/live/')) { try { window._liveCleanup(); } catch (e) {} window._liveCleanup = null; }
     this.renderNav();
     window.scrollTo(0, 0);
     // per-screen custom background (Appearance feature, localStorage only)
     if (typeof Appearance !== 'undefined') Appearance.applyForHash(hash);
-    const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat'];
+    const needAuth = ['#/mentors', '#/companions', '#/wallet', '#/settings', '#/create', '#/admin', '#/friends', '#/chat', '#/missions', '#/servers', '#/hall-of-fame'];
     if (!this.user && needAuth.some(p => hash === p || hash.startsWith(p + '/'))) {
       el.innerHTML = `<div class="card center"><h3>✨ Join Luminous</h3><div class="muted">Log in or create an account to use this feature.</div>
         <div class="mt"><button class="btn" onclick="Views.authModal()">Log in / Sign up</button></div></div>`;
@@ -120,6 +121,9 @@ const App = {
     else if (hash === '#/wallet') Views.wallet(el);
     else if (hash.startsWith('#/profile/')) Views.profile(el, decodeURIComponent(hash.split('/')[2]));
     else if (hash === '#/settings') Views.settings(el);
+    else if (hash === '#/missions') Views.missions(el);
+    else if (hash === '#/hall-of-fame') Views.hallOfFame(el);
+    else if (hash.startsWith('#/servers/')) Views.server(el, hash.split('/')[2]);
     else if (hash === '#/create') Views.create(el);
     else if (hash === '#/admin') Views.admin(el);
     else Views.feed(el);
