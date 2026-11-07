@@ -70,7 +70,7 @@ function mountNetAds(root) {
   });
 }
 const aiNotice = () => `<div class="notice">🤖 <b>AI is not configured on this server yet.</b><br>
-  <span class="muted">The server owner needs to set an <code>OPENAI_API_KEY</code> environment variable and redeploy. Everything else in Luminous works without it.</span></div>`;
+  <span class="muted">The server owner needs to set an <code>LUMIAI_API_KEY</code> environment variable and redeploy. Everything else in Luminous works without it.</span></div>`;
 
 /* ---------------- appearance customization (per-screen backgrounds + accent) ----------------
    Saved ONLY in this browser (localStorage), like the ChatGPT concept:
