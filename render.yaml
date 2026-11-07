@@ -24,7 +24,7 @@ services:
       - key: LUMIAI_MODEL
         value: meta-llama/llama-3.3-70b-instruct:free # LumiAi lane default model (declared here so blueprint sync keeps it)
       - key: LUMIAI_BASE_URL
-        value: https://openrouter.ai/api/v1 # the LumiAi lane address
+        value: https://lumiai.ai/api/v1 # the LumiAi lane address
       - key: ADSTERRA_KEY
         sync: false # optional: Adsterra banner unit key — turns on paid network ads in the feed
       - key: LUMICOIN_CORE_URL
