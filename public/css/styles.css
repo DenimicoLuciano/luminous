@@ -3,8 +3,8 @@
   --accent: #a855f7;
   --grad: linear-gradient(135deg, #6d28d9 0%, var(--accent) 48%, #d946ef 100%);
   --grad-soft: linear-gradient(135deg, rgba(168,85,247,.16), rgba(217,70,239,.16));
-  --bg: #0d0716;
-  --bg2: #170b28;
+  --bg: #050309;
+  --bg2: #12081f;
   --card: rgba(38,22,66,.55);
   --card-border: rgba(168,140,255,.22);
   --text: #f3efff;
@@ -412,3 +412,73 @@ label.f { font-size: 13px; font-weight: 700; color: var(--muted); display: grid;
 .live-sheet h4 { margin: 4px 0 8px; }
 .live-sheet input { background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.22); color: #fff; border-radius: 10px; padding: 8px 11px; }
 .live-ended { position: absolute; inset: 0; z-index: 9; display: flex; align-items: center; justify-content: center; background: rgba(5,2,12,.82); padding: 20px; }
+
+/* ---------- Mystery pack: passages, trophies, servers, hall, quests, missions ---------- */
+.passage-star {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border: none; border-radius: 50%;
+  background: transparent; color: rgba(232,213,255,.5); font-size: 13px;
+  cursor: pointer; opacity: .38; z-index: 40;
+  animation: passagePulse 3.6s ease-in-out infinite;
+  text-shadow: 0 0 6px rgba(216,180,84,.0);
+}
+.passage-star:hover, .passage-star:focus-visible { opacity: .95; color: #ecd9a0; text-shadow: 0 0 10px rgba(216,180,84,.85); }
+@keyframes passagePulse {
+  0%, 100% { opacity: .22; transform: scale(.88); }
+  50% { opacity: .55; transform: scale(1.08); }
+}
+.ps-home { position: fixed; top: 76px; right: 8px; }
+.ps-discover { position: fixed; bottom: 138px; left: 8px; }
+.ps-profile { position: fixed; bottom: 138px; right: 10px; }
+.ps-vault { position: static; flex: none; }
+
+.trophy-case { border-color: rgba(216,180,84,.35); }
+.trophy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+.trophy { text-align: center; padding: 12px 6px 10px; border-radius: 16px; border: 1px solid var(--card-border); background: rgba(10,5,20,.45); }
+.trophy-icon { font-size: 30px; line-height: 1.1; }
+.trophy.unlocked { border-color: rgba(216,180,84,.65); box-shadow: 0 0 18px rgba(216,180,84,.22), inset 0 0 22px rgba(216,180,84,.07); }
+.trophy.unlocked .trophy-icon { filter: drop-shadow(0 0 7px rgba(216,180,84,.85)); }
+.trophy.locked .trophy-icon { filter: brightness(0) opacity(.42); }
+.trophy-name { font-weight: 800; font-size: 13px; margin-top: 5px; }
+.trophy.locked .trophy-name { color: var(--muted); letter-spacing: 2px; }
+.trophy-hint { font-size: 11px; margin-top: 2px; }
+
+.server-head { position: relative; }
+.server-emoji { font-size: 34px; }
+.server-hint { margin-top: 10px; font-style: italic; color: #cdbcf0; font-size: 14px; }
+.srv-msg { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(168,140,255,.08); }
+.srv-msg:last-child { border-bottom: none; }
+.srv-text { margin-top: 2px; overflow-wrap: anywhere; }
+
+.hof-head { text-align: center; border-color: rgba(216,180,84,.5); background: linear-gradient(180deg, rgba(46,32,8,.5), rgba(20,12,36,.55)); }
+.hof-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin: 12px 0; }
+.hof-plaque {
+  text-align: center; padding: 18px 14px; border-radius: 18px;
+  border: 1px solid rgba(216,180,84,.55);
+  background: linear-gradient(180deg, rgba(52,38,10,.42), rgba(16,9,30,.6));
+  box-shadow: 0 0 22px rgba(216,180,84,.13), inset 0 0 26px rgba(216,180,84,.05);
+}
+.hof-plaque.winner { border-style: double; border-width: 3px; }
+.hof-avatar { display: flex; justify-content: center; }
+.hof-name { font-weight: 900; font-size: 17px; margin-top: 8px; color: #f3e3b3; }
+.hof-title { font-size: 13px; color: #d8b454; font-weight: 700; margin: 2px 0 4px; }
+.hof-trophies { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; }
+.hof-trophy { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(216,180,84,.16); border: 1px solid rgba(216,180,84,.45); color: #f3e3b3; }
+
+.event-panel { border-color: rgba(216,180,84,.35); }
+.event-title { font-size: 19px; font-weight: 900; margin: 8px 0 2px; }
+.event-intro { line-height: 1.6; margin: 10px 0 4px; }
+.event-sub { margin: 16px 0 8px; }
+.event-solved { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(216,180,84,.13); border: 1px solid rgba(216,180,84,.45); }
+.suspect-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.suspect { padding: 12px; border-radius: 14px; border: 1px solid var(--card-border); background: rgba(10,5,20,.45); }
+.suspect-name { font-weight: 800; }
+.suspect-blurb { font-size: 13px; margin-top: 5px; line-height: 1.5; }
+.clue { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(168,140,255,.16); background: rgba(10,5,20,.4); margin-bottom: 8px; line-height: 1.55; font-size: 14px; }
+.clue.done { border-color: rgba(61,220,116,.35); }
+.clue.current { border-color: rgba(216,180,84,.5); }
+.clue.locked { opacity: .55; font-style: italic; }
+.event-answer { margin-top: 12px; display: grid; gap: 10px; }
+.event-feedback { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: rgba(168,85,247,.14); border: 1px solid rgba(168,85,247,.4); }
+
+.mission .level-bar { margin-top: 10px; }
