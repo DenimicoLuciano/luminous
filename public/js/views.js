@@ -1486,7 +1486,7 @@ const Views = {
 
   /* ---------------- WALLET ---------------- */
   async wallet(el) {
-    const { wallet, payouts, canEarn, payoutThresholdCents, earnPer1kViews, payoutMethod } = await API.get('/wallet');
+    const { wallet, canEarn, earnPer1kViews } = await API.get('/wallet');
     const earnDollars = (wallet.earnings_cents / 100).toFixed(2);
     el.innerHTML = `
       <div class="card"><h3 style="margin:0 0 10px">👛 Wallet</h3>
@@ -1494,69 +1494,16 @@ const Views = {
           <div class="stat card"><div class="num">🪙 ${wallet.coins}</div><div class="muted">coins</div></div>
           <div class="stat card"><div class="num">$${earnDollars}</div><div class="muted">ad earnings</div></div>
         </div></div>
-      <div class="card"><h4 style="margin:0 0 8px">💳 Cashout method</h4>
-        <div id="pmBox"></div>
+      <div class="card"><h4 style="margin:0 0 8px">🏦 Withdraw</h4>
+        <div class="muted">Luminous is where you earn. Lumibank is where you withdraw.</div>
+        <div class="mt"><a class="btn" href="https://muse.ai/s/lumibank-xdxr6exq7xpxgxoxi9/XVwLxZ6SIAy_7zXHV572ox2fXuZUFhJ7YsDHIAgmFUM" target="_blank" rel="noopener">Withdraw on Lumibank</a></div>
       </div>
       <div class="card"><h4 style="margin:0 0 8px">💰 Creator earnings</h4>
         ${canEarn ? `
-          <div class="muted">You earn <b>55% of ad revenue</b> — <b>$${earnPer1kViews.toFixed(2)} per 1,000 real views</b> on your posts. (AI demo-account views never count.)</div>
-          <div class="mt row"><button class="btn" id="payoutBtn" ${wallet.earnings_cents < payoutThresholdCents ? 'disabled' : ''}>
-            Request payout ($${earnDollars})</button></div>
-          ${wallet.earnings_cents < payoutThresholdCents ? `<div class="muted mt">Minimum payout is $10.00.</div>` : ''}`
+          <div class="muted">You earn <b>55% of ad revenue</b> — <b>$${earnPer1kViews.toFixed(2)} per 1,000 real views</b> on your posts. (AI demo-account views never count.)</div>`
         : `<div class="notice">Earnings are for <b>Business</b> and <b>Creator</b> accounts with the <b>✓ Approved</b> identity badge.
             <div class="mt"><a class="btn small" href="#/settings">Upgrade in Settings</a></div></div>`}
-      </div>
-      <div class="card"><h4 style="margin:0 0 8px">Payout history</h4>
-        ${payouts.length ? payouts.map(p => `<div class="row"><div class="grow">$${(p.amount_cents / 100).toFixed(2)} · ${timeAgo(p.created_at)}${p.destination ? ` · to ${esc(p.destination)}` : ''}</div><span class="badge">${esc(p.status)}</span></div>`).join('')
-          : `<div class="muted">No payouts yet.</div>`}</div>`;
-    // ---- cashout method wiring ----
-    const pmBox = document.getElementById('pmBox');
-    const pmLabel = (pm) => pm.method === 'paypal' ? `PayPal — ${esc(pm.paypal_email)}` : `Visa debit •••• ${esc(pm.card_last4 || '')} (${esc(pm.card_name || '')})`;
-    const pmForm = () => {
-      pmBox.innerHTML = `<div class="muted">Where should your cashouts go? You can save this <b>now</b> — you don't need to reach the $10 minimum first.</div>
-        <div class="mt"><select id="pmMethod" style="width:100%">
-          <option value="paypal">PayPal</option>
-          <option value="visa_debit">Visa debit card</option>
-        </select></div>
-        <div id="pmFields" class="mt"></div>
-        <div class="row mt"><button class="btn small" id="pmSave">Save cashout method</button>
-        ${payoutMethod ? '<button class="btn small ghost" id="pmCancel">Cancel</button>' : ''}</div>`;
-      const fields = document.getElementById('pmFields');
-      const draw = () => {
-        const m = document.getElementById('pmMethod').value;
-        fields.innerHTML = m === 'paypal'
-          ? `<input id="pmEmail" type="email" placeholder="Your PayPal email" style="width:100%">`
-          : `<input id="pmName" placeholder="Name on card" style="width:100%">
-             <input id="pmLast4" inputmode="numeric" maxlength="4" placeholder="Last 4 digits ONLY" class="mt" style="width:100%">
-             <div class="muted mt">For safety we only ever store the <b>last 4 digits</b> — never enter your full card number.</div>`;
-      };
-      document.getElementById('pmMethod').onchange = draw; draw();
-      const cancel = document.getElementById('pmCancel'); if (cancel) cancel.onclick = pmShow;
-      document.getElementById('pmSave').onclick = async () => {
-        const m = document.getElementById('pmMethod').value;
-        const body = { method: m };
-        if (m === 'paypal') body.paypal_email = document.getElementById('pmEmail').value;
-        else { body.card_name = document.getElementById('pmName').value; body.card_last4 = document.getElementById('pmLast4').value; }
-        try { await API.post('/wallet/payout-method', body); toast('Cashout method saved'); Views.wallet(el); }
-        catch (e) { toast(e.data?.error || 'Could not save'); }
-      };
-    };
-    const pmShow = () => {
-      if (payoutMethod) {
-        pmBox.innerHTML = `<div class="row"><span class="grow">${pmLabel(payoutMethod)}</span>
-          <button class="btn small ghost" id="pmChange">Change</button>
-          <button class="btn small ghost" id="pmRemove">Remove</button></div>
-          <div class="muted mt">This is where payouts will be sent when you cash out.</div>`;
-        document.getElementById('pmChange').onclick = pmForm;
-        document.getElementById('pmRemove').onclick = async () => { try { await API.del('/wallet/payout-method'); toast('Cashout method removed'); Views.wallet(el); } catch (e) { toast('Could not remove'); } };
-      } else pmForm();
-    };
-    pmShow();
-    const btn = document.getElementById('payoutBtn');
-    if (btn) btn.onclick = async () => {
-      try { const r = await API.post('/wallet/payout'); toast(`Payout requested: $${(r.amount_cents / 100).toFixed(2)} 🎉`); Views.wallet(el); App.refreshAuth(); }
-      catch (e) { toast(e.data?.error || 'Payout failed'); }
-    };
+      </div>`;
   },
 
   /* ---------------- PROFILE ---------------- */
