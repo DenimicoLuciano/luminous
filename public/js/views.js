@@ -245,6 +245,109 @@ function msgHtml(m) {
   return `<div class="msg ${mine ? 'me' : 'them'}"><div class="bubble">${esc(m.content)}</div><div class="msg-time">${timeAgo(m.created_at)}</div></div>`;
 }
 
+/* ---------------- Mystery pack helpers ---------------- */
+// A secret passage: a tiny shimmering glimmer hidden in a dark corner of a
+// screen. Most people scroll right past it. It is not labelled anywhere.
+const passageStarHtml = (key, extraCls) => `<button type="button" class="passage-star ${extraCls || ''}" data-passage="${key}" aria-label="a faint glimmer">✦</button>`;
+function wirePassageStars(root) {
+  root.querySelectorAll('[data-passage]').forEach(b => b.onclick = () => Views.discoverPassage(b.dataset.passage));
+}
+
+function trophyCaseHtml(u) {
+  const trophies = u.trophies || [];
+  if (!trophies.length) return '';
+  const hint = (t) => {
+    if (t.unlocked) return 'Unlocked ✦';
+    if (t.threshold) return `Reach ${t.threshold.toLocaleString()} followers`;
+    if (t.key === 'mystery-winner') return 'Win a Monthly Quest — Murder Mystery';
+    if (t.key === 'treasure-winner') return 'Win a Monthly Quest — Treasure Hunt';
+    if (t.key === 'founder') return 'The Founder only';
+    return 'Locked';
+  };
+  return `<div class="card trophy-case">
+    <h3 style="margin:0">🏆 Creator Awards</h3>
+    <div class="muted" style="margin:4px 0 12px">Channel milestones — 1K · 100K · 1M followers. Like play buttons, but shinier: these unlock at real follower counts, earned one follow at a time.</div>
+    <div class="trophy-grid">${trophies.map(t => `
+      <div class="trophy ${t.unlocked ? 'unlocked' : 'locked'}">
+        <div class="trophy-icon">${t.icon}</div>
+        <div class="trophy-name">${t.unlocked ? esc(t.name) : '✦ ✦ ✦'}</div>
+        <div class="muted trophy-hint">${esc(t.unlocked ? t.name : hint(t))}</div>
+      </div>`).join('')}</div>
+  </div>`;
+}
+
+// Monthly Quest panel (rendered inside its home server: the Murder Mystery
+// lives in The Midnight Library, the Treasure Hunt starts in The Vault).
+async function renderEventPanel(kind) {
+  const wrap = document.getElementById('evPanel');
+  if (!wrap) return;
+  let data;
+  try { data = await API.get('/events/current'); } catch (e) { wrap.innerHTML = ''; return; }
+  const ev = (data.events || []).find(e => e.kind === kind);
+  if (!ev) { wrap.innerHTML = ''; return; }
+  const head = kind === 'mystery' ? '📖 Monthly Quest — Murder Mystery' : '🗺️ Monthly Quest — Treasure Hunt';
+  if (ev.state === 'being-written') {
+    wrap.innerHTML = `<div class="card event-panel"><h3 style="margin:0">${head}</h3>
+      <div class="muted mt">✍️ This month's ${kind === 'mystery' ? 'case' : 'hunt'} is still being written by the Founder. Check back soon — the darkness is patient.</div></div>`;
+    return;
+  }
+  const fb = Views._evFeedback && Views._evFeedback[kind];
+  let h = `<div class="card event-panel"><h3 style="margin:0">${head}</h3>
+    <div class="event-title">${esc(ev.title)}</div>
+    <div class="muted">${esc(ev.month)} · ${ev.state === 'solved' ? `Solved by <b>${esc(ev.winner)}</b> 🏆` : 'Still open — the first to solve it is engraved in the Hall of Fame'}</div>
+    <p class="event-intro">${esc(ev.intro)}</p>`;
+  if (ev.state === 'solved') h += `<div class="event-solved">🏆 ${ev.winner_is_me ? 'You solved it — your name is engraved in the Hall of Fame.' : `Solved by ${esc(ev.winner)}. The next quest opens with a new month.`}</div>`;
+  if (kind === 'mystery') {
+    h += `<h4 class="event-sub">The suspects</h4><div class="suspect-grid">${(ev.suspects || []).map(s => `
+      <div class="suspect"><div class="suspect-name">${esc(s.name)}</div><div class="muted">${esc(s.role)}</div><div class="suspect-blurb">${esc(s.blurb)}</div></div>`).join('')}</div>`;
+    h += `<h4 class="event-sub">Clues (${ev.clues_seen}/${ev.clues_total})</h4>`;
+    h += ev.clues.length ? ev.clues.map(c => `<div class="clue">${esc(c)}</div>`).join('') : `<div class="muted">No clues examined yet, detective.</div>`;
+    if (ev.state === 'open') {
+      if (ev.clues_seen < ev.clues_total) h += `<button class="btn small mt" id="evClueBtn">🔍 Examine the next clue</button>`;
+      else h += `<div class="event-answer">
+          <label class="f">Name the informant<select id="evSuspect">${(ev.suspects || []).map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('')}</select></label>
+          <label class="f">Why did they do it? (the motive, in your words)<input id="evMotive" maxlength="200" placeholder="One word can hang a case…"></label>
+          <button class="btn small" id="evAccuseBtn">⚖️ Make the accusation</button>
+          <div class="muted mt">Your attempts so far: ${ev.my_attempts} · Wrong accusations cost nothing but pride.</div></div>`;
+    }
+  } else {
+    h += `<h4 class="event-sub">The chain of whispers (${ev.my_step}/${ev.steps_total})</h4>`;
+    h += (ev.riddles || []).map(r => `<div class="clue ${r.done ? 'done' : 'current'}"><b>Whisper ${r.n} — ${esc(r.place)}</b><br>${esc(r.riddle)}${r.done ? ' <span class="badge">✓ answered</span>' : ''}</div>`).join('');
+    for (let i = (ev.riddles || []).length; i < ev.steps_total; i++) h += `<div class="clue locked">🔒 A whisper you have not reached yet…</div>`;
+    if (ev.state === 'open' && ev.my_step < ev.steps_total) h += `<div class="event-answer">
+        <label class="f">Answer the whisper<input id="evGuess" maxlength="200" placeholder="Speak the name it listens for…"></label>
+        <button class="btn small" id="evAnswerBtn">🗝️ Answer</button>
+        <div class="muted mt">Your attempts so far: ${ev.my_attempts}</div></div>`;
+  }
+  if (fb) h += `<div class="event-feedback">${esc(fb)}</div>`;
+  h += `</div>`;
+  wrap.innerHTML = h;
+  const setFb = (msg) => { Views._evFeedback = Views._evFeedback || {}; Views._evFeedback[kind] = msg; };
+  const clueBtn = document.getElementById('evClueBtn');
+  if (clueBtn) clueBtn.onclick = async () => { try { await API.post(`/events/${ev.id}/clue`, {}); renderEventPanel(kind); } catch (e) { toast('Could not examine the clue'); } };
+  const accBtn = document.getElementById('evAccuseBtn');
+  if (accBtn) accBtn.onclick = async () => {
+    try {
+      const r = await API.post(`/events/${ev.id}/answer`, { suspect: document.getElementById('evSuspect').value, motive: document.getElementById('evMotive').value });
+      setFb(r.message || (r.correct ? 'Correct!' : 'Not quite.'));
+    } catch (e) { setFb((e.data && e.data.message) || 'Could not submit that accusation'); }
+    renderEventPanel(kind);
+  };
+  const ansBtn = document.getElementById('evAnswerBtn');
+  if (ansBtn) {
+    const submit = async () => {
+      try {
+        const r = await API.post(`/events/${ev.id}/answer`, { guess: document.getElementById('evGuess').value });
+        setFb(r.message || '');
+      } catch (e) { setFb('Could not submit that answer'); }
+      renderEventPanel(kind);
+    };
+    ansBtn.onclick = submit;
+    const gi = document.getElementById('evGuess');
+    if (gi) gi.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  }
+}
+
 /* ---------------- calls (WebRTC over REST signaling) ---------------- */
 const CallUI = {
   pc: null, stream: null, callId: null, poll: null, seenCandidates: 0, remoteSet: false,
@@ -461,7 +564,8 @@ const Views = {
         </div>
       </section>
       ${composerHtml}
-      <div id="feedList"></div>`;
+      <div id="feedList"></div>
+      ${passageStarHtml('home-star', 'ps-home')}`;
 
     // story circles open the existing viewer; "Your story" opens yours or the creator
     el.querySelectorAll('[data-story]').forEach(btn => btn.onclick = () => Views.storyViewer(otherTrays[+btn.dataset.story], 0));
@@ -507,6 +611,7 @@ const Views = {
     el.querySelectorAll('#feedTabs button').forEach(b => b.onclick = () => renderTab(b.dataset.ft));
     renderTab(Views._feedTab && ['following', 'video'].includes(Views._feedTab) ? Views._feedTab : 'foryou');
     el.querySelectorAll('#feedTabs button').forEach(b => b.addEventListener('click', () => { Views._feedTab = b.dataset.ft; }));
+    wirePassageStars(el);
 
     /* ---- composer wiring ---- */
     if (App.user) {
@@ -1481,23 +1586,35 @@ const Views = {
             <div class="muted">@${esc(u.username)}</div>
             ${u.is_developer ? `<div class="dev-title">👨‍💻 Founder &amp; Developer of Luminous</div>` : ''}
             <div class="mt">${badgesHtml(u)}</div></div>
-          ${isOwn ? `<span class="row"><a class="btn small ghost" href="#/appearance">✦ Appearance</a><a class="btn small ghost" href="#/settings">Edit</a></span>` : ''}
+          ${isOwn ? `<span class="row"><a class="btn small ghost" href="#/appearance">✦ Appearance</a><a class="btn small ghost" href="#/settings">Edit</a></span>` : (App.user ? `<span class="row"><button class="btn small" id="followBtn">${u.is_following ? 'Following ✓' : 'Follow'}</button></span>` : '')}
         </div>
         <div class="mt"><span class="status-dot" style="background:${statusColor}"></span><span class="muted">${esc(u.status)}</span>
           ${u.public_age ? ` · <span class="muted">${u.public_age} yrs old</span>` : ''}</div>
         ${u.bio ? `<div class="mt">${esc(u.bio)}</div>` : ''}
         ${u.hobbies?.length ? `<div class="chips">${u.hobbies.map(h => `<span class="chip">${esc(h)}</span>`).join('')}</div>` : ''}
+        <div class="mt"><b>${u.follower_count ?? 0}</b> <span class="muted">Followers</span> · <b>${u.following_count ?? 0}</b> <span class="muted">Following</span></div>
         <div class="mt"><b>Level ${u.level}</b> <span class="muted">· ${u.xp} XP</span>
           <div class="level-bar"><i style="width:${Math.min(100, (u.xp / (100 * u.level * u.level)) * 100)}%"></i></div></div>
       </div>
+      ${trophyCaseHtml(u)}
       <div class="tabs">
         <button data-t="posts" class="${tab === 'posts' ? 'active' : ''}">Posts</button>
         <button data-t="lums" class="${tab === 'lums' ? 'active' : ''}">Lums</button>
         <button data-t="milestones" class="${tab === 'milestones' ? 'active' : ''}">Milestones</button>
       </div>
       <div id="ptab"></div>
+      ${passageStarHtml('profile-star', 'ps-profile')}
       <div class="brand-foot">✦ <b>LUMINOUS</b> · Built for creativity, connection, and growth.</div>`;
     el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { App._profileTab = b.dataset.t; Views.profile(el, username); });
+    wirePassageStars(el);
+    const followBtn = document.getElementById('followBtn');
+    if (followBtn) followBtn.onclick = async () => {
+      followBtn.disabled = true;
+      try {
+        await API.post(`/users/${u.id}/${u.is_following ? 'unfollow' : 'follow'}`, {});
+        Views.profile(el, username);
+      } catch (e) { toast(e.data?.error || 'Could not follow'); followBtn.disabled = false; }
+    };
     const ptab = document.getElementById('ptab');
     if (tab === 'posts') ptab.innerHTML = posts.length ? posts.map(postCard).join('') : `<div class="card center muted">No posts yet.</div>`;
     else if (tab === 'lums') ptab.innerHTML = lums.length ? lums.map(l => `<div class="card"><b>${esc(l.caption || '🎬')}</b><div class="muted">👁 ${l.views} · ${timeAgo(l.created_at)}</div></div>`).join('') : `<div class="card center muted">No Lums yet.</div>`;
@@ -1675,6 +1792,9 @@ const Views = {
         ${item('#/mentors', '💫', 'AI Mentors')}
         ${item('#/companions', '🪄', 'AI Companions')}
         ${item('#/wallet', '👛', 'Wallet')}
+        ${App.user ? item('#/missions', '🎯', 'Weekly Missions') : ''}
+        ${Views._discCache && Views._discCache.servers && Views._discCache.servers.length ? `<button id="mmServers"><span class="mi">🕯️</span>My Servers</button>` : ''}
+        ${Views._discCache && Views._discCache.discoveries && Views._discCache.discoveries.includes('hall-of-fame') ? item('#/hall-of-fame', '🏆', 'Hall of Fame') : ''}
         <a href="https://muse.ai/s/lumiads-qxs6exenbxdgxwxi/W9lB2q9kRmrNpisoDNRkXdSmpbmOtKiZpN8J6BQKAeI" target="_blank" rel="noopener" onclick="closeModal()"><span class="mi">📣</span>LumiAds · Advertise here</a>
         ${item('#/appearance', '✦', 'Customize appearance')}
         ${App.user ? item('#/settings', '⚙️', 'Settings') : ''}
@@ -1691,6 +1811,17 @@ const Views = {
       localStorage.setItem('luminous_theme', next);
       Views.moreMenu();
     };
+    const mmSrv = document.getElementById('mmServers');
+    if (mmSrv) mmSrv.onclick = () => Views.myServers();
+    // Hidden things stay hidden until found: refresh what this user has
+    // discovered, and quietly re-render the open menu if it changed.
+    if (App.user) {
+      API.get('/servers/mine').then(d => {
+        const changed = JSON.stringify(d) !== JSON.stringify(Views._discCache || null);
+        Views._discCache = d;
+        if (changed && document.getElementById('modalRoot').innerHTML) Views.moreMenu();
+      }).catch(() => {});
+    }
     const login = document.getElementById('mmLogin');
     if (login) login.onclick = () => { closeModal(); Views.authModal(); };
     const logout = document.getElementById('mmLogout');
@@ -1952,6 +2083,9 @@ const Views = {
     let deb = null;
     document.getElementById('discQ').addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(run, 450); });
     document.getElementById('discQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+    const dv = document.getElementById('discVids');
+    if (dv) dv.insertAdjacentHTML('afterend', passageStarHtml('discover-star', 'ps-discover'));
+    wirePassageStars(el);
   },
 
   /* ---------------- FRIENDS ---------------- */
@@ -2067,6 +2201,156 @@ const Views = {
     } catch (e) {
       el.innerHTML = `<div class="card center"><h3>💬 Chat unavailable</h3><div class="muted">${esc(e.data?.error || 'You are not friends yet')}</div><div class="mt"><a class="btn" href="#/friends">Back to friends</a></div></div>`;
     }
+  },
+
+  /* ---------------- MYSTERY PACK: passages, servers, hall, missions ---------------- */
+  async discoverPassage(key) {
+    if (!App.user) { Views.authModal(); return; }
+    let r;
+    try { r = await API.post('/servers/discover', { passage: key }); }
+    catch (e) { toast('The darkness keeps its secret… for now.'); return; }
+    if (r.found === 'hall-of-fame') {
+      openModal(`<div class="center"><div style="font-size:40px">🏆</div>
+        <h3 style="margin:6px 0">You found the Hall of Fame</h3>
+        <div class="muted">Hidden beneath the Vault, where the legends of Luminous hang in gold. Few ever find this door.</div>
+        <div class="mt"><button class="btn" onclick="closeModal();location.hash='#/hall-of-fame'">Enter the Hall</button></div></div>`);
+      return;
+    }
+    if (r.found === 'server') {
+      const s = r.server;
+      openModal(`<div class="center"><div style="font-size:40px">🕯️</div>
+        <h3 style="margin:6px 0">You found a secret passage…</h3>
+        <div style="font-size:22px">${esc(s.emoji)} <b>${esc(s.name)}</b></div>
+        <div class="muted mt">${esc(s.tagline)} · ${s.member_count} member${s.member_count === 1 ? '' : 's'} slipped inside before you</div>
+        <div class="mt"><button class="btn" id="dpJoin">${s.joined ? 'Enter' : 'Step inside'}</button>
+        <button class="btn ghost" onclick="closeModal()">Not yet</button></div></div>`);
+      document.getElementById('dpJoin').onclick = async () => {
+        if (!s.joined) {
+          try { await API.post(`/servers/${s.id}/join`, {}); }
+          catch (e) { toast('The passage sealed itself — try again'); return; }
+        }
+        closeModal();
+        location.hash = '#/servers/' + s.id;
+      };
+    }
+  },
+
+  async myServers() {
+    let data;
+    try { data = await API.get('/servers/mine'); } catch (e) { toast('Could not open your passages'); return; }
+    Views._discCache = data;
+    openModal(`<div class="row"><span class="logo-tile" style="width:38px;height:38px;font-size:19px;border-radius:12px">🕯️</span>
+      <h3 style="margin:0" class="grow">My Servers</h3>
+      <button class="icon-btn" onclick="closeModal()" aria-label="Close">✕</button></div>
+      <div class="more-list mt">${data.servers.length ? data.servers.map(s => `<a href="#/servers/${s.id}" onclick="closeModal()"><span class="mi">${esc(s.emoji)}</span>${esc(s.name)}<span class="muted"> · ${s.member_count} members</span></a>`).join('') : '<div class="muted">You have not slipped into any hidden server yet.</div>'}</div>
+      <div class="brand-foot">🕯️ These places are not listed anywhere. You found them.</div>`);
+  },
+
+  async server(el, id) {
+    id = parseInt(id);
+    el.innerHTML = `<div class="card center"><div class="muted">Slipping through the passage…</div></div>`;
+    let data;
+    try { data = await API.get(`/servers/${id}/messages`); }
+    catch (e) {
+      el.innerHTML = `<div class="card center"><h3>🕯️ A locked darkness</h3><div class="muted">${esc(e.data?.error || 'You have not found this place yet.')}</div><div class="mt"><a class="btn" href="#/">Back to the light</a></div></div>`;
+      return;
+    }
+    const s = data.server;
+    const evKind = s.slug === 'midnight-library' ? 'mystery' : (s.slug === 'the-vault' ? 'treasure' : null);
+    const msgRow = (m) => `<div class="srv-msg">${avatarHtml(m.author, 34)}
+      <div class="grow"><div class="name">${esc(m.author.display_name)} ${badgesHtml(m.author)} <span class="muted">@${esc(m.author.username)} · ${timeAgo(m.created_at)}</span></div>
+      <div class="srv-text">${esc(m.text)}</div></div></div>`;
+    el.innerHTML = `
+      <div class="card server-head">
+        <div class="row"><span class="server-emoji">${esc(s.emoji)}</span>
+          <div class="grow"><h2 style="margin:0">${esc(s.name)}</h2>
+          <div class="muted">${esc(s.tagline)} · ${s.member_count} member${s.member_count === 1 ? '' : 's'}</div></div>
+          ${s.slug === 'the-vault' ? passageStarHtml('fame-star', 'ps-vault') : ''}
+        </div>
+        ${s.hint ? `<div class="server-hint">🕯️ ${esc(s.hint)}</div>` : ''}
+      </div>
+      ${evKind ? '<div id="evPanel"></div>' : ''}
+      <div class="card chat-box" id="srvBox">${data.messages.length ? data.messages.map(msgRow).join('') : `<div class="muted center">Silence… be the first voice in the dark. 🕯️</div>`}</div>
+      <div class="card chat-input-row"><input id="srvInput" maxlength="500" placeholder="Whisper into ${esc(s.name)}…"><button class="btn" id="srvSend">Send</button></div>`;
+    wirePassageStars(el);
+    if (evKind) renderEventPanel(evKind);
+    const box = document.getElementById('srvBox');
+    if (box) box.scrollTop = box.scrollHeight;
+    const refresh = async () => {
+      try {
+        const d = await API.get(`/servers/${id}/messages`);
+        const b2 = document.getElementById('srvBox');
+        if (!b2) { if (window._serverTimer) { clearInterval(window._serverTimer); window._serverTimer = null; } return; }
+        const nearBottom = b2.scrollHeight - b2.scrollTop - b2.clientHeight < 140;
+        b2.innerHTML = d.messages.length ? d.messages.map(msgRow).join('') : `<div class="muted center">Silence… be the first voice in the dark. 🕯️</div>`;
+        if (nearBottom) b2.scrollTop = b2.scrollHeight;
+      } catch (e) { /* ignore */ }
+    };
+    const send = async () => {
+      const inp = document.getElementById('srvInput');
+      const v = inp.value.trim();
+      if (!v) return;
+      inp.value = '';
+      try { await API.post(`/servers/${id}/messages`, { text: v }); await refresh(); const b3 = document.getElementById('srvBox'); if (b3) b3.scrollTop = b3.scrollHeight; }
+      catch (e) { toast(e.data?.error || 'Could not send'); }
+    };
+    document.getElementById('srvSend').onclick = send;
+    document.getElementById('srvInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+    if (window._serverTimer) clearInterval(window._serverTimer);
+    window._serverTimer = setInterval(refresh, 5000);
+  },
+
+  async hallOfFame(el) {
+    el.innerHTML = `<div class="card center"><div class="muted">Polishing the gold…</div></div>`;
+    let data;
+    try { data = await API.get('/hall-of-fame'); }
+    catch (e) { el.innerHTML = `<div class="card center">The Hall sleeps. Try again.</div>`; return; }
+    const plaque = (e) => `<div class="hof-plaque">
+        <div class="hof-avatar">${avatarHtml(e.user, 64)}</div>
+        <div class="hof-name">${esc(e.user.display_name)}</div>
+        <div class="hof-title">${esc(e.title)}</div>
+        <div class="muted">@${esc(e.user.username)} · ${e.follower_count} followers</div>
+        <div class="hof-trophies">${e.trophies.length ? e.trophies.map(t => `<span class="hof-trophy">${t.icon} ${esc(t.name)}</span>`).join('') : '<span class="muted">—</span>'}</div>
+      </div>`;
+    el.innerHTML = `
+      <div class="card hof-head"><h2 style="margin:0">🏆 Hall of Fame</h2>
+        <div class="muted mt">A hidden hall beneath Luminous, where legends hang in gold. It cannot be searched for. It can only be found.</div></div>
+      <div class="hof-grid">${data.entries.map(plaque).join('')}</div>
+      ${data.awaiting_first_legend ? `<div class="card center muted">The hall awaits its first legend. Reach 1,000 followers and take your place beside the Founder.</div>` : ''}
+      <h3 class="section-title">✒️ Engraved Winners — Monthly Quests</h3>
+      ${data.winners && data.winners.length ? `<div class="hof-grid">${data.winners.map(w => `
+        <div class="hof-plaque winner"><div style="font-size:30px">${w.kind === 'mystery' ? '🔎' : '🗺️'}</div>
+          <div class="hof-name">${esc(w.winner)}</div>
+          <div class="hof-title">${esc(w.title)}</div>
+          <div class="muted">${esc(w.month)} · ${w.kind === 'mystery' ? 'Murder Mystery' : 'Treasure Hunt'}</div></div>`).join('')}</div>`
+        : `<div class="card center muted">No quest has been conquered yet. The first engraving awaits its name.</div>`}
+      <div class="brand-foot">✦ <b>LUMINOUS</b> · Fame, here, is earned in the dark and kept in the light.</div>`;
+  },
+
+  async missions(el) {
+    el.innerHTML = `<div class="card center"><div class="muted">Loading this week's missions…</div></div>`;
+    let data;
+    try { data = await API.get('/missions'); }
+    catch (e) { el.innerHTML = `<div class="card center">Couldn't load missions.</div>`; return; }
+    el.innerHTML = `
+      <div class="card"><h2 style="margin:0">🎯 Weekly Missions</h2>
+        <div class="muted mt">Week ${esc(data.week)} · New missions every Monday.</div>
+        <div class="muted">Missions earn coins and grow your channel — Creator Awards unlock at real follower milestones.</div></div>
+      ${data.missions.map(m => {
+        const pct = Math.min(100, Math.round((m.progress / m.target) * 100));
+        return `<div class="card mission">
+          <div class="row"><div class="grow"><b>${esc(m.title)}</b>
+            <div class="muted">${m.progress}/${m.target} · Reward: ${m.reward} LUMI</div></div>
+            ${m.claimed ? '<span class="badge">✓ Claimed</span>' : (m.complete ? `<button class="btn small" data-claim="${esc(m.key)}">Claim ${m.reward} LUMI</button>` : `<span class="muted">${pct}%</span>`)}
+          </div>
+          <div class="level-bar mt"><i style="width:${pct}%"></i></div></div>`;
+      }).join('')}
+      <div class="brand-foot">✦ <b>LUMINOUS</b> · Small steps, every week, compound.</div>`;
+    el.querySelectorAll('[data-claim]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await API.post(`/missions/${b.dataset.claim}/claim`, {}); toast(`Claimed ${r.reward} LUMI 🎉`); Views.missions(el); App.refreshAuth(); }
+      catch (e) { toast(e.data?.message || e.data?.error || 'Could not claim'); b.disabled = false; }
+    });
   },
 
   /* ---------------- AUTH MODAL ---------------- */
