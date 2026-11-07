@@ -49,7 +49,7 @@ function isOverloadError(e) {
 
 async function callAIOnce(system, messages, { maxTokens, contextLimit, stream, onToken }) {
   const model = process.env.LUMIAI_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
-  const base = (process.env.LUMIAI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const base = (process.env.LUMIAI_BASE_URL || 'https://lumiai.ai/api/v1').replace(/\/$/, '');
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
